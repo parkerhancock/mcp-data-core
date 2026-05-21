@@ -141,4 +141,4 @@ Tests are pure-Python — no network, no fixtures, no live APIs. They exercise t
 
 ## License
 
-Apache-2.0
+MIT
