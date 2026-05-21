@@ -1,0 +1,43 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+dist/
+*.egg-info/
+*.egg
+.eggs/
+
+# Testing
+.pytest_cache/
+.coverage
+htmlcov/
+.tox/
+.nox/
+coverage.xml
+
+# Type checkers
+.mypy_cache/
+.pyright/
+.ty/
+
+# uv / venvs
+.venv/
+venv/
+env/
+.python-version
+
+# Editors
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+
+# Caches that may be produced by the package itself during local runs
+.cache/
+
+# Hatch
+.hatch/
