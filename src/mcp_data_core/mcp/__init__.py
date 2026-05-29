@@ -24,6 +24,7 @@ from .conditional import (
 )
 from .downloads import (
     RESOURCE_SCHEME,
+    BlobStore,
     BulkItem,
     build_download_url,
     build_download_url_or_fetch,
@@ -33,10 +34,12 @@ from .downloads import (
     download_response,
     download_tool_result,
     fetch_with_cache,
+    get_blob_store,
     handle_download,
     read_resource,
     reap_stale_bulk_zips,
     register_source,
+    set_blob_store,
     sign_path,
     verify_path,
 )
@@ -48,6 +51,7 @@ __all__ = [
     "READ_ONLY",
     "RESOURCE_SCHEME",
     "BearerTokenAuth",
+    "BlobStore",
     "BulkItem",
     "FriendlyErrors",
     "ToolCallLogger",
@@ -62,6 +66,7 @@ __all__ = [
     "download_response",
     "download_tool_result",
     "fetch_with_cache",
+    "get_blob_store",
     "handle_download",
     "make_auth",
     "make_domain_gate_middleware",
@@ -69,6 +74,7 @@ __all__ = [
     "reap_stale_bulk_zips",
     "register_source",
     "register_source_if_configured",
+    "set_blob_store",
     "sign_path",
     "verify_path",
 ]

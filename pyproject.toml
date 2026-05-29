@@ -1,6 +1,6 @@
 [project]
 name = "mcp-data-core"
-version = "0.1.0"
+version = "0.2.0"
 description = "Shared async HTTP scaffolding, response envelopes, corpus storage, and MCP server plumbing for data-fetching research toolkits."
 readme = "README.md"
 authors = [
@@ -34,7 +34,7 @@ dependencies = [
 [project.optional-dependencies]
 mcp = [
     "fastmcp>=3.2.3",
-    "starlette>=0.37",
+    "starlette>=1.0.1",
     # fastmcp imports `from griffe import ...` — the 2.x release split the
     # top-level module out into a separate `griffelib` distribution, so
     # fastmcp's import fails on griffe>=2. Pin here until upstream fastmcp

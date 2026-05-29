@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import io
 import os
 import time
 import zipfile
@@ -677,3 +678,130 @@ class TestSweeperThrottle:
         monkeypatch.setattr(downloads, "reap_stale_bulk_zips", fake_reap)
         downloads._maybe_reap_bulk_zips()
         assert calls["n"] == 1
+
+
+class _FakeBlobStore:
+    """In-memory BlobStore double for the injected-store download path.
+
+    Records every put() and mints a deterministic, store-shaped signed
+    URL (distinct from the HMAC ``/downloads/?key=`` form) so tests can
+    assert the URL came from the store rather than the legacy route.
+    """
+
+    def __init__(self) -> None:
+        self.objects: dict[str, tuple[bytes, str, str | None]] = {}
+
+    async def put(
+        self,
+        key: str,
+        content: bytes,
+        *,
+        content_type: str = "application/octet-stream",
+        filename: str | None = None,
+    ) -> None:
+        self.objects[key] = (content, content_type, filename)
+
+    def sign_url(self, key: str) -> str:
+        return f"https://storage.example.com/{key}?X-Goog-Signature=fake"
+
+
+@pytest.fixture
+def injected_store():
+    store = _FakeBlobStore()
+    downloads.set_blob_store(store)
+    try:
+        yield store
+    finally:
+        downloads.set_blob_store(None)
+
+
+class TestInjectedBlobStore:
+    def test_protocol_is_satisfied(self, injected_store) -> None:
+        assert isinstance(injected_store, downloads.BlobStore)
+        assert downloads.get_blob_store() is injected_store
+
+    async def test_download_response_uploads_and_signs(self, injected_store, monkeypatch) -> None:
+        # Even with PUBLIC_URL set (legacy HMAC mode), the injected store wins.
+        monkeypatch.setenv("LAW_TOOLS_CORE_API_KEY", "secret")
+        monkeypatch.setenv("LAW_TOOLS_CORE_PUBLIC_URL", "https://mcp.example.com")
+        payload = await downloads.download_response(
+            "uspto/applications/13842859/documents/ABC",
+            b"%PDF-1.7 fake",
+            filename="doc.pdf",
+            content_type="application/pdf",
+        )
+        # Bytes landed in the store under the resource path.
+        assert "uspto/applications/13842859/documents/ABC" in injected_store.objects
+        stored, ctype, fname = injected_store.objects[
+            "uspto/applications/13842859/documents/ABC"
+        ]
+        assert stored == b"%PDF-1.7 fake"
+        assert ctype == "application/pdf"
+        assert fname == "doc.pdf"
+        # download_url is the store's direct signed URL, not the HMAC route.
+        assert payload["download_url"].startswith("https://storage.example.com/")
+        assert "/downloads/" not in payload["download_url"]
+        assert "?key=" not in payload["download_url"]
+        assert payload["expires_at"].endswith("Z")
+        assert payload["size_bytes"] == len(b"%PDF-1.7 fake")
+
+    async def test_download_response_no_local_cache_write(
+        self, injected_store, tmp_path, monkeypatch
+    ) -> None:
+        # Store mode must NOT touch the local disk cache.
+        cache = tmp_path / "cache"
+        monkeypatch.setenv("LAW_TOOLS_CORE_DOWNLOAD_CACHE", str(cache))
+        await downloads.download_response(
+            "patents/US10000000B2", b"bytes", filename="p.pdf"
+        )
+        assert not cache.exists()
+
+    async def test_bulk_n1_short_circuit_uses_store(self, injected_store) -> None:
+        async def fetcher(_: BulkItem) -> tuple[bytes, str]:
+            return b"one", "single.pdf"
+
+        payload = await download_bulk_response(
+            [BulkItem(item_id="i1", resource_path="uspto/applications/1/documents/X")],
+            fetcher,
+            container_label="job",
+        )
+        assert payload["download_url"].startswith("https://storage.example.com/")
+        assert "uspto/applications/1/documents/X" in injected_store.objects
+
+    async def test_bulk_nplus_uploads_zip_and_each_item(self, injected_store) -> None:
+        async def fetcher(item: BulkItem) -> tuple[bytes, str]:
+            return f"body-{item.item_id}".encode(), f"{item.item_id}.pdf"
+
+        items = [
+            BulkItem(item_id="a", resource_path="uspto/applications/1/documents/A"),
+            BulkItem(item_id="b", resource_path="uspto/applications/1/documents/B"),
+        ]
+        payload = await download_bulk_response(items, fetcher, container_label="bundle")
+        # Top-level zip URL is store-backed (no per-instance tempfile, no HMAC).
+        assert payload["download_url"].startswith("https://storage.example.com/bulk_zips/")
+        assert "file_path" not in payload
+        # Each doc was uploaded individually so its per-item URL is durable.
+        assert "uspto/applications/1/documents/A" in injected_store.objects
+        assert "uspto/applications/1/documents/B" in injected_store.objects
+        # The zip itself is in the store under a bulk_zips/ key.
+        zip_keys = [k for k in injected_store.objects if k.startswith("bulk_zips/")]
+        assert len(zip_keys) == 1
+        zip_bytes, zip_ctype, _ = injected_store.objects[zip_keys[0]]
+        assert zip_ctype == "application/zip"
+        with zipfile.ZipFile(io.BytesIO(zip_bytes)) as zf:
+            assert len(zf.namelist()) == 2
+
+    async def test_clearing_store_restores_legacy_path(
+        self, tmp_path, monkeypatch
+    ) -> None:
+        # With no store injected and no PUBLIC_URL, download_response falls
+        # back to the local tempfile path (file_path, no download_url).
+        downloads.set_blob_store(None)
+        monkeypatch.delenv("LAW_TOOLS_CORE_PUBLIC_URL", raising=False)
+        monkeypatch.delenv("LAW_TOOLS_PUBLIC_URL", raising=False)
+        monkeypatch.setenv("LAW_TOOLS_CORE_DOWNLOAD_CACHE", str(tmp_path / "cache"))
+        payload = await downloads.download_response(
+            "patents/US9999999B2", b"x", filename="p.pdf"
+        )
+        assert "download_url" not in payload
+        assert "file_path" in payload

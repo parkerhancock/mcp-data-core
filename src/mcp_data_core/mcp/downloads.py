@@ -45,8 +45,9 @@ import uuid
 import zipfile
 from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from typing import Protocol, runtime_checkable
 
 from fastmcp.resources import ResourceContent
 from fastmcp.tools.tool import ToolResult  # ty: ignore[unresolved-import]
@@ -103,6 +104,77 @@ def _key_rotation_seconds() -> int:
 
 
 _PERMANENT_BUCKET = "permanent"  # sentinel for non-expiring URLs
+
+
+# ---------------------------------------------------------------------------
+# Durable blob store (injected by cloud deployments)
+# ---------------------------------------------------------------------------
+
+
+@runtime_checkable
+class BlobStore(Protocol):
+    """Durable object store for download bytes.
+
+    The default download path caches bytes on local disk and hands back
+    an HMAC ``/downloads/{path}?key=`` URL that routes back through this
+    server. On an autoscaled, ephemeral host (e.g. Cloud Run) that path
+    is fragile: the cache is per-instance, so a follow-up GET that lands
+    on a different instance — or the same instance after a cold start —
+    finds nothing and 404s ("Unknown resource"). Bulk-zip tempfiles have
+    the same problem.
+
+    A deployment can inject a durable store (e.g. GCS) via
+    :func:`set_blob_store`. When set, download payloads upload bytes to
+    the store at tool-call time and return a direct signed URL, so this
+    server never sits in the byte-delivery path and the URL survives
+    instance scale-down. The concrete implementation (and its cloud SDK
+    dependency) lives in the consuming app — this package stays
+    storage-agnostic.
+    """
+
+    async def put(
+        self,
+        key: str,
+        content: bytes,
+        *,
+        content_type: str = ...,
+        filename: str | None = ...,
+    ) -> None:
+        """Persist ``content`` under ``key`` (idempotent overwrite)."""
+        ...
+
+    def sign_url(self, key: str) -> str:
+        """Return a time-limited URL that serves ``key`` directly."""
+        ...
+
+
+_blob_store: BlobStore | None = None
+
+
+def set_blob_store(store: BlobStore | None) -> None:
+    """Inject (or clear) the durable blob store used by download payloads.
+
+    Call once at server startup. Passing ``None`` restores the default
+    local-cache + HMAC ``/downloads`` behavior (the VM/stdio path).
+    """
+    global _blob_store
+    _blob_store = store
+
+
+def get_blob_store() -> BlobStore | None:
+    """Return the injected blob store, or ``None`` when unset."""
+    return _blob_store
+
+
+def _store_expires_at_iso() -> str:
+    """Guaranteed-good-until horizon for a freshly minted signed URL.
+
+    Mirrors the legacy ``expires_at`` semantic so the agent has a
+    deadline: the signed URL is valid for ``DOWNLOAD_TTL_SECONDS`` from
+    now (the store's signature TTL).
+    """
+    expiry = datetime.now(UTC) + timedelta(seconds=_key_rotation_seconds())
+    return expiry.strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
 # ---------------------------------------------------------------------------
@@ -371,6 +443,23 @@ async def download_response(
         "resource_uri": build_resource_uri(resource_path),
         **extras,
     }
+
+    # Durable-store path (cloud deployments): upload the bytes and return
+    # a direct signed URL. This server never delivers the bytes, so the
+    # URL survives instance scale-down — no local cache, no HMAC route.
+    store = _blob_store
+    if store is not None:
+        await store.put(
+            resource_path,
+            content,
+            content_type=content_type,
+            filename=filename,
+        )
+        payload["download_url"] = store.sign_url(resource_path)
+        if not permanent:
+            payload["expires_at"] = _store_expires_at_iso()
+        return payload
+
     # Cache the bytes in both transport modes — the MCP resources/read
     # handler reads from the same per-doc cache as the HTTP route, so
     # we want them warm regardless of which path a client picks.
@@ -622,6 +711,7 @@ async def download_bulk_response(
         raise BulkDownloadError("download_bulk_response called with no items")
 
     container_meta = dict(container_metadata or {})
+    store = _blob_store
 
     if len(items) == 1:
         only = items[0]
@@ -655,12 +745,27 @@ async def download_bulk_response(
         entry["status"] = "ok"
         entry["filename"] = f"{item.item_id}/{filename}"
         entry["size_bytes"] = len(content)
+        # Durable-store path: upload each doc so its per-item download_url
+        # points straight at the store and survives instance scale-down.
+        # resource_uri is still gated on a registered source — the pca://
+        # URI resolves through resources/read (which re-fetches), and
+        # ad-hoc bulk paths have no fetcher to call.
+        if store is not None:
+            await store.put(
+                item.resource_path,
+                content,
+                content_type=content_type_single,
+                filename=filename,
+            )
+            entry["download_url"] = store.sign_url(item.resource_path)
+            if _match_source(item.resource_path) is not None:
+                entry["resource_uri"] = build_resource_uri(item.resource_path)
         # Only advertise a resource_uri / per-item download_url for items
         # whose resource_path maps to a registered source. Bulk callers
         # sometimes mint ad-hoc paths (e.g. ``ptab/trial-decisions/{id}``)
         # that are used only as cache keys — exposing those as MCP URIs
         # would dangle because resources/read has no fetcher to call.
-        if _match_source(item.resource_path) is not None:
+        elif _match_source(item.resource_path) is not None:
             entry["resource_uri"] = build_resource_uri(item.resource_path)
             if _public_url():
                 entry["download_url"] = build_download_url(item.resource_path)
@@ -702,7 +807,23 @@ async def download_bulk_response(
         "manifest": manifest,
     }
 
-    if _public_url():
+    if store is not None:
+        # Durable-store path: the assembled zip goes to the store under a
+        # one-shot key and the URL points straight at it. Fixes the
+        # bulk-zip 404 on Cloud Run — the zip no longer lives in a single
+        # instance's tempdir, so cross-instance routing and scale-down are
+        # no longer fatal.
+        bulk_id = uuid.uuid4().hex
+        bulk_key = f"bulk_zips/{bulk_id}"
+        await store.put(
+            bulk_key,
+            zip_bytes,
+            content_type="application/zip",
+            filename=zip_filename,
+        )
+        payload["download_url"] = store.sign_url(bulk_key)
+        payload["expires_at"] = _store_expires_at_iso()
+    elif _public_url():
         bulk_id = uuid.uuid4().hex
         bulk_dir = _bulk_zip_dir()
         await asyncio.to_thread(bulk_dir.mkdir, parents=True, exist_ok=True)
