@@ -43,14 +43,21 @@ from .downloads import (
     sign_path,
     verify_path,
 )
-from .middleware import BearerTokenAuth, FriendlyErrors, ToolCallLogger
+
+# ``BearerTokenAuth`` is re-exported (redundant ``as`` alias) for backward
+# compatibility but intentionally left out of ``__all__``: it is deprecated in
+# favor of FastMCP-native auth via ``make_auth`` / ``build_server(auth=...)``.
+# The alias keeps it importable (``from mcp_data_core.mcp import
+# BearerTokenAuth``) so existing consumers don't break, just un-advertised so
+# new code doesn't couple to it.
+from .middleware import BearerTokenAuth as BearerTokenAuth
+from .middleware import FriendlyErrors, ToolCallLogger
 from .server_factory import build_server
 
 __all__ = [
     "DOWNLOAD",
     "READ_ONLY",
     "RESOURCE_SCHEME",
-    "BearerTokenAuth",
     "BlobStore",
     "BulkItem",
     "FriendlyErrors",

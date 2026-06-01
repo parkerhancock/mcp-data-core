@@ -12,6 +12,7 @@ import logging
 import sys
 import time
 import traceback
+import warnings
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
@@ -98,12 +99,29 @@ class FriendlyErrors(Middleware):
 class BearerTokenAuth(Middleware):
     """Reject requests without a valid bearer token.
 
+    .. deprecated::
+        ``BearerTokenAuth`` predates FastMCP's auth-provider model and
+        duplicates what FastMCP's ``StaticTokenVerifier`` does natively.
+        Use :func:`mcp_data_core.mcp.auth.make_auth` (which returns a
+        ``StaticTokenVerifier`` for the static-token case) and pass it to
+        ``build_server(auth=...)`` instead. This middleware is retained for
+        backward compatibility only and is slated for removal once known
+        consumers are confirmed migrated.
+
     Reads the expected token from ``LAW_TOOLS_CORE_API_KEY`` (or the
     legacy ``LAW_TOOLS_API_KEY`` alias). If the variable is not set,
     all requests are allowed (local/stdio mode).
     """
 
     def __init__(self) -> None:
+        warnings.warn(
+            "BearerTokenAuth is deprecated and will be removed in a future "
+            "release. Use mcp_data_core.mcp.auth.make_auth(...) with "
+            "build_server(auth=...) (FastMCP StaticTokenVerifier / MultiAuth) "
+            "instead.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
         self._token = _env.get("API_KEY", "")
 
     async def on_call_tool(self, context: MiddlewareContext, call_next):  # noqa: ANN001
