@@ -41,7 +41,7 @@ That's the full surface. Retry, caching, error mapping, and connection pooling a
 | **Typed exceptions** | `McpDataCoreError` base + `ApiError`, `RateLimitError`, `NotFoundError`, `AuthenticationError`, `ServerError`, `ConfigurationError`, `ValidationError`, `ParseError`. Log-first error formatting: `str(err)` appends the log path so agents can inspect without keeping stacktraces in context. |
 | **Per-app file logging** | `logging.configure("my_app")` attaches a file handler under the `my_app` logger tree, writing to `~/.cache/my_app/my_app.log`. Idempotent; each consumer library logs to its own file. |
 | **Bundled corpora** | `corpus_db` (SQLite/FTS5 reader) and `corpus_compression` (zstd) for libraries that ship statutes, manuals, or other reference text alongside their API client. |
-| **MCP server scaffolding** *(opt-in)* | FastMCP server factory, bearer-token auth, domain gating middleware, conditional tool registration, signed HMAC download URLs with on-disk cache, and OAuth 2.1 + PKCE + DCR helpers. |
+| **MCP server scaffolding** *(opt-in)* | FastMCP server factory, FastMCP-native auth wiring (`make_auth` → `StaticTokenVerifier` / `MultiAuth` with Google OAuth 2.1 + PKCE + DCR), domain gating middleware, conditional tool registration, and signed HMAC download URLs with on-disk cache. |
 
 ## Real-world usage
 
@@ -105,8 +105,8 @@ mcp_data_core/
 ├── corpus_compression.py # zstd helpers
 └── mcp/                  # Optional — installed via [mcp] extra
     ├── server_factory.py # FastMCP app factory
-    ├── auth.py           # OAuth 2.1 + bearer-token helpers
-    ├── middleware.py     # Domain gate, friendly errors, logging
+    ├── auth.py           # make_auth — FastMCP-native auth (StaticTokenVerifier / MultiAuth)
+    ├── middleware.py     # Domain gate, friendly errors, logging (BearerTokenAuth: deprecated)
     ├── conditional.py    # Conditional tool registration
     ├── downloads.py      # Signed HMAC download URLs + on-disk cache
     └── annotations.py    # Tool annotations (READ_ONLY, DESTRUCTIVE)

@@ -94,3 +94,20 @@ def test_log_to_stdout_falsy_values_dont_attach(monkeypatch, falsy, fresh_middle
     monkeypatch.setenv("LAW_TOOLS_CORE_LOG_TO_STDOUT", falsy)
     fresh_middleware._configure_tool_logger()
     assert fresh_middleware._tool_logger.handlers == []
+
+
+def test_bearer_token_auth_is_deprecated() -> None:
+    """Constructing the legacy BearerTokenAuth middleware emits a DeprecationWarning."""
+    from mcp_data_core.mcp.middleware import BearerTokenAuth
+
+    with pytest.warns(DeprecationWarning, match="make_auth"):
+        BearerTokenAuth()
+
+
+def test_bearer_token_auth_not_in_public_api() -> None:
+    """BearerTokenAuth is importable but no longer advertised in the package __all__."""
+    import mcp_data_core.mcp as mcp_pkg
+
+    assert "BearerTokenAuth" not in mcp_pkg.__all__
+    # Still importable for backward compatibility.
+    assert mcp_pkg.BearerTokenAuth is not None

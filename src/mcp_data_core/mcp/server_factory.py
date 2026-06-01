@@ -14,15 +14,26 @@ Auth selection:
   :func:`mcp_data_core.mcp.auth.make_auth`), FastMCP handles
   bearer/OAuth validation and the legacy ``/oauth/token`` route and
   ``BearerTokenAuth`` middleware are NOT wired. This is the HTTP
-  deployment path.
+  deployment path and the recommended way to add auth.
 - If ``auth=None`` (default), the server keeps the legacy behavior:
   ``BearerTokenAuth`` middleware enforces ``LAW_TOOLS_CORE_API_KEY``
   when set, and a ``/oauth/token`` ``client_credentials`` endpoint is
   exposed for OAuth-only clients. This is the stdio / local-dev path
   and a safe fallback for servers not yet migrated to the new helpers.
+
+  .. deprecated::
+      The ``auth=None`` legacy path (``BearerTokenAuth`` middleware +
+      the ``/oauth/token`` client-credentials route) is deprecated and
+      slated for removal. When an API key is set it now emits a
+      ``DeprecationWarning``. Migrate to
+      ``build_server(auth=make_auth(...))``, which uses FastMCP's native
+      ``StaticTokenVerifier`` / ``MultiAuth``. Setting up stdio / local
+      dev with no API key continues to work and does not warn.
 """
 
 from __future__ import annotations
+
+import warnings
 
 import mcp.types
 from fastmcp import FastMCP
@@ -73,7 +84,26 @@ def build_server(
     # Outer-to-inner: FriendlyErrors wraps ToolCallLogger so the JSONL
     # log sees the raw exception type, not the remapped ToolError.
     if auth is None:
-        mcp.add_middleware(BearerTokenAuth())
+        # Legacy path. When an API key is set, this enforces auth via the
+        # deprecated BearerTokenAuth middleware + /oauth/token route. Steer
+        # callers toward make_auth(...) / FastMCP-native auth. The no-key
+        # stdio / local-dev case is not deprecated and stays quiet.
+        if _env.get("API_KEY", ""):
+            warnings.warn(
+                "build_server(auth=None) with LAW_TOOLS_CORE_API_KEY set wires "
+                "the deprecated BearerTokenAuth middleware and /oauth/token "
+                "client-credentials route. This legacy path is slated for "
+                "removal; pass auth=make_auth(...) "
+                "(mcp_data_core.mcp.auth.make_auth) to use FastMCP-native auth "
+                "(StaticTokenVerifier / MultiAuth) instead.",
+                DeprecationWarning,
+                stacklevel=2,
+            )
+        # BearerTokenAuth.__init__ also emits its own DeprecationWarning; it is
+        # a no-op (allows all requests) when no API key is configured.
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", DeprecationWarning)
+            mcp.add_middleware(BearerTokenAuth())
     mcp.add_middleware(FriendlyErrors())
     mcp.add_middleware(ToolCallLogger())
     # Ensure every tool ships a human-readable title (MCP clients + directory
@@ -90,11 +120,15 @@ def build_server(
 
         @mcp.custom_route("/oauth/token", methods=["POST"])
         async def _oauth_token(request: Request) -> JSONResponse:
-            """OAuth2 client-credentials grant (legacy path).
+            """OAuth2 client-credentials grant (legacy, deprecated path).
 
             Validates ``client_secret`` against ``LAW_TOOLS_CORE_API_KEY``
             and returns it as an access token. Preserved for servers
             that haven't migrated to the new auth stack yet.
+
+            Deprecated: use ``build_server(auth=make_auth(...))``; FastMCP's
+            native auth providers expose standards-compliant token endpoints.
+            Slated for removal once known consumers are confirmed migrated.
             """
             token = _env.get("API_KEY", "")
             if not token:
