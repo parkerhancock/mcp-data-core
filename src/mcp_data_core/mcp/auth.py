@@ -46,6 +46,11 @@ if TYPE_CHECKING:
 _DEFAULT_MCP_REDIRECT_URIS: tuple[str, ...] = (
     "https://claude.ai/*",
     "https://*.anthropic.com/*",
+    # ChatGPT connector / Apps SDK OAuth callbacks land at
+    # ``https://chatgpt.com/connector/oauth/<id>`` (legacy ``chat.openai.com``).
+    # Required for any connector that lists in the ChatGPT App Directory.
+    "https://chatgpt.com/*",
+    "https://chat.openai.com/*",
     # Native OAuth clients (Claude Code CLI, gcloud-style helpers) follow
     # RFC 8252 §7.3 and bind a loopback listener on an ephemeral port,
     # registering ``http://localhost:<port>/callback`` as their redirect.

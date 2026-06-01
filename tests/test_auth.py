@@ -199,6 +199,12 @@ class TestDefaultRedirectUris:
         assert "https://claude.ai/*" in auth_module._DEFAULT_MCP_REDIRECT_URIS
         assert "https://*.anthropic.com/*" in auth_module._DEFAULT_MCP_REDIRECT_URIS
 
+    def test_includes_chatgpt_connector(self) -> None:
+        # ChatGPT's connector OAuth callback is https://chatgpt.com/connector/
+        # oauth/<id>; without this, DCR fails for the ChatGPT App Directory.
+        assert "https://chatgpt.com/*" in auth_module._DEFAULT_MCP_REDIRECT_URIS
+        assert "https://chat.openai.com/*" in auth_module._DEFAULT_MCP_REDIRECT_URIS
+
     def test_includes_native_loopback_for_claude_code(self) -> None:
         # Claude Code (and other RFC 8252 native clients) bind a local HTTP
         # listener on an ephemeral port. The ``:*`` wildcard makes any port
