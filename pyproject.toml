@@ -1,6 +1,6 @@
 [project]
 name = "mcp-data-core"
-version = "0.3.0"
+version = "0.4.0"
 description = "Shared async HTTP scaffolding, response envelopes, corpus storage, and MCP server plumbing for data-fetching research toolkits."
 readme = "README.md"
 authors = [

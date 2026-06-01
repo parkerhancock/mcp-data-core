@@ -32,7 +32,7 @@ from starlette.responses import JSONResponse
 
 from . import _env
 from .downloads import handle_download
-from .middleware import BearerTokenAuth, FriendlyErrors, ToolCallLogger
+from .middleware import BearerTokenAuth, DefaultToolTitles, FriendlyErrors, ToolCallLogger
 
 
 def build_server(
@@ -76,6 +76,10 @@ def build_server(
         mcp.add_middleware(BearerTokenAuth())
     mcp.add_middleware(FriendlyErrors())
     mcp.add_middleware(ToolCallLogger())
+    # Ensure every tool ships a human-readable title (MCP clients + directory
+    # reviews expect one alongside readOnlyHint); derived from the tool name
+    # when the author didn't set one explicitly.
+    mcp.add_middleware(DefaultToolTitles())
 
     @mcp.custom_route("/downloads/{path:path}", methods=["GET"])
     async def _downloads_route(request: Request):  # noqa: ANN202
