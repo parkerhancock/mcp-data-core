@@ -199,3 +199,54 @@ class ToolCallLogger(Middleware):
                 record["error"] = error_msg
                 record["traceback"] = error_tb
             _tool_logger.info(json.dumps(record, default=str))
+
+
+# ---------------------------------------------------------------------------
+# DefaultToolTitles
+# ---------------------------------------------------------------------------
+
+# Acronyms kept upper-cased in a humanized title instead of being title-cased
+# ("fda" -> "FDA", not "Fda"). Domain terms for the data sources these
+# servers wrap.
+_TITLE_ACRONYMS = frozenset(
+    {
+        "fda", "cms", "cdc", "nih", "ncbi", "nci", "nppes", "umls", "uspstf",
+        "ndc", "pma", "udi", "spl", "loinc", "icd", "icd10cm", "rxnorm",
+        "rxcui", "cpc", "evs", "vehss", "mhs", "pfs", "gudid", "pmc", "hpo",
+        "ucum", "epo", "ptab", "uspto", "sec", "nsde", "ucr", "api", "url",
+        "id", "ndcs", "gdc",
+    }
+)
+
+
+def _humanize_tool_name(name: str) -> str:
+    """Derive a human-readable title from a snake_case tool name.
+
+    ``get_drug_label`` -> ``Get Drug Label``; known acronyms stay upper.
+    """
+    words = [w for w in name.replace("-", "_").split("_") if w]
+    return " ".join(w.upper() if w.lower() in _TITLE_ACRONYMS else w.capitalize() for w in words)
+
+
+class DefaultToolTitles(Middleware):
+    """Fill a human-readable ``title`` on any tool that lacks one.
+
+    MCP clients and directory reviews (notably Anthropic's Connectors
+    Directory) expect every tool to carry a ``title`` alongside its
+    ``readOnlyHint``. Tools declared with just ``@mcp.tool(annotations=
+    READ_ONLY)`` have ``title=None``; this derives one from the tool name at
+    list time so every connector built on this factory ships titles without
+    per-tool boilerplate. Tools that set their own ``title`` are left as-is.
+    """
+
+    async def on_list_tools(self, context, call_next):  # noqa: ANN001
+        tools = await call_next(context)
+        result = []
+        for tool in tools:
+            if getattr(tool, "title", None):
+                result.append(tool)
+            else:
+                result.append(
+                    tool.model_copy(update={"title": _humanize_tool_name(tool.name)})
+                )
+        return result
