@@ -147,6 +147,22 @@ class BlobStore(Protocol):
         """Return a time-limited URL that serves ``key`` directly."""
         ...
 
+    async def read_object(self, key: str) -> bytes | None:
+        """Read raw bytes at ``key`` server-side, or ``None`` if absent.
+
+        Used by :func:`fetch_with_cache` as a read-through tier: on a
+        local-disk miss, bytes a *prior* call persisted here (e.g. from a
+        different autoscaled instance) are pulled back instead of re-hitting
+        the upstream source. A cloud store satisfies this with a same-region
+        object read — far cheaper than a fresh upstream fetch, which is what
+        makes a retry after a partial outage reuse the docs that already
+        succeeded.
+
+        Optional: stores predating this method are tolerated — callers probe
+        with ``getattr`` and skip read-through when it is absent.
+        """
+        ...
+
 
 _blob_store: BlobStore | None = None
 
@@ -616,6 +632,26 @@ async def fetch_with_cache(
         content, cached_filename = cached
         if cached_filename:
             return content, cached_filename
+    # Read-through to the durable store before falling back to the upstream.
+    # A prior call (possibly on another autoscaled instance) may have already
+    # persisted these bytes here; a same-region object read is far cheaper than
+    # re-fetching from the upstream, so a retry after a partial outage reuses
+    # the docs that already succeeded. ``read_object`` is optional — older
+    # injected stores simply skip this tier.
+    store = _blob_store
+    if store is not None:
+        reader = getattr(store, "read_object", None)
+        if reader is not None:
+            stored = await reader(resource_path)
+            if stored is not None:
+                # No filename survives the store read, so derive one from the
+                # path's last segment. Bulk callers recompute their own
+                # download names; this just gives the local /downloads route a
+                # usable Content-Disposition and makes the warm-back below a
+                # real cache hit on same-instance repeats.
+                name = resource_path.rsplit("/", 1)[-1] or resource_path
+                _cache_put(resource_path, stored, filename=name)
+                return stored, name
     if fetcher is not None:
         content, filename = await fetcher()
     else:
@@ -715,7 +751,17 @@ async def download_bulk_response(
 
     if len(items) == 1:
         only = items[0]
-        content, filename = await fetcher(only)
+        try:
+            content, filename = await fetcher(only)
+        except Exception as exc:  # noqa: BLE001 — mirror the n>1 all-failed contract
+            # A single-item bulk has nothing to partially succeed, so a fetch
+            # failure means zero downloads — the same condition that raises
+            # BulkDownloadError in the multi-item path below. Raise the same
+            # error shape; the chained cause carries the (retried, enriched)
+            # underlying error for transient-outage detection.
+            raise BulkDownloadError(
+                f"All 1 items failed to fetch (first error: {exc})."
+            ) from exc
         extras: dict = {**container_meta, "item_id": only.item_id, **only.metadata}
         return await download_response(
             only.resource_path,

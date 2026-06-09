@@ -293,11 +293,25 @@ class BaseAsyncClient:
         if timeout:
             request_kwargs["timeout"] = timeout
 
-        async for attempt in default_retryer(max_attempts=self._max_retries):
-            with attempt:
-                response = await self._client.request(method, url, **request_kwargs)
-                self._raise_for_status(response, context)
-                return response
+        try:
+            async for attempt in default_retryer(max_attempts=self._max_retries):
+                with attempt:
+                    response = await self._client.request(method, url, **request_kwargs)
+                    self._raise_for_status(response, context)
+                    return response
+        except ServerError as exc:
+            # A 5xx survived every retry. Re-raise with guidance so callers can
+            # distinguish "the upstream is down right now" from "your request is
+            # malformed". (429/RateLimitError keeps its own retry_after message.)
+            attempts = max(self._max_retries, 1)
+            plural = "attempt" if attempts == 1 else "attempts"
+            raise ServerError(
+                f"{exc.args[0] if exc.args else exc} — persisted after {attempts} "
+                f"{plural}; this is a transient upstream outage, not a problem with "
+                f"your request. Retry in a few minutes.",
+                exc.status_code,
+                exc.response_body,
+            ) from exc
 
         # Should not reach here due to reraise=True in retryer
         raise RuntimeError("Unexpected retry exhaustion")

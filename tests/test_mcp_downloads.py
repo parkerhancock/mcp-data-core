@@ -156,6 +156,34 @@ class TestDownloadResponse:
         assert "expires_at" not in payload
 
 
+class _ReadThroughStore:
+    """Minimal BlobStore stub exercising the ``read_object`` read-through."""
+
+    def __init__(self, objects: dict[str, bytes]) -> None:
+        self._objects = objects
+        self.reads: list[str] = []
+
+    async def put(self, key, content, *, content_type="application/octet-stream", filename=None):
+        self._objects[key] = content
+
+    def sign_url(self, key: str) -> str:
+        return f"https://store.test/{key}"
+
+    async def read_object(self, key: str) -> bytes | None:
+        self.reads.append(key)
+        return self._objects.get(key)
+
+
+class _NoReadStore:
+    """Older store that predates ``read_object`` — read-through must skip it."""
+
+    async def put(self, key, content, *, content_type="application/octet-stream", filename=None):
+        ...
+
+    def sign_url(self, key: str) -> str:
+        return f"https://store.test/{key}"
+
+
 class TestFetchWithCache:
     def test_cache_miss_invokes_fetcher_and_writes_cache(self, tmp_path, monkeypatch) -> None:
         monkeypatch.setenv("LAW_TOOLS_CORE_DOWNLOAD_CACHE", str(tmp_path / "cache"))
@@ -182,6 +210,80 @@ class TestFetchWithCache:
         monkeypatch.setenv("LAW_TOOLS_CORE_DOWNLOAD_CACHE", str(tmp_path / "cache"))
         with pytest.raises(ValueError, match="No registered fetcher"):
             asyncio.run(fetch_with_cache("nope/X"))
+
+    def test_read_through_serves_store_bytes_without_upstream(
+        self, tmp_path, monkeypatch
+    ) -> None:
+        # Local-disk miss + durable store hit → serve the stored bytes and
+        # never touch the upstream. This is what makes a retry after a partial
+        # outage reuse the docs that already succeeded (on another instance).
+        monkeypatch.setenv("LAW_TOOLS_CORE_DOWNLOAD_CACHE", str(tmp_path / "cache"))
+        calls = {"n": 0}
+
+        async def fetcher(remainder: str) -> tuple[bytes, str]:
+            calls["n"] += 1
+            return b"from-upstream", f"{remainder}.pdf"
+
+        downloads.register_source("src", fetcher)
+        store = _ReadThroughStore({"src/X": b"from-store"})
+        downloads.set_blob_store(store)
+        try:
+            content, filename = asyncio.run(fetch_with_cache("src/X"))
+            assert content == b"from-store"  # served from the durable store
+            assert filename == "X"  # derived from the resource path's last segment
+            assert calls["n"] == 0  # upstream never hit
+            assert store.reads == ["src/X"]
+            # Bytes were warmed into the local cache with the derived name, so a
+            # same-instance repeat is a true local hit — no second store read.
+            content2, filename2 = asyncio.run(fetch_with_cache("src/X"))
+            assert content2 == b"from-store"
+            assert filename2 == "X"
+            assert calls["n"] == 0
+            assert store.reads == ["src/X"]  # store not probed again
+        finally:
+            downloads.set_blob_store(None)
+
+    def test_read_through_store_miss_falls_back_to_upstream(
+        self, tmp_path, monkeypatch
+    ) -> None:
+        monkeypatch.setenv("LAW_TOOLS_CORE_DOWNLOAD_CACHE", str(tmp_path / "cache"))
+        calls = {"n": 0}
+
+        async def fetcher(remainder: str) -> tuple[bytes, str]:
+            calls["n"] += 1
+            return b"from-upstream", f"{remainder}.pdf"
+
+        downloads.register_source("src", fetcher)
+        store = _ReadThroughStore({})  # store has nothing
+        downloads.set_blob_store(store)
+        try:
+            content, filename = asyncio.run(fetch_with_cache("src/X"))
+            assert content == b"from-upstream"  # store missed → upstream
+            assert filename == "X.pdf"
+            assert calls["n"] == 1
+            assert store.reads == ["src/X"]  # store was probed first
+        finally:
+            downloads.set_blob_store(None)
+
+    def test_read_through_skipped_when_store_lacks_read_object(
+        self, tmp_path, monkeypatch
+    ) -> None:
+        # A store predating read_object must not break fetch_with_cache.
+        monkeypatch.setenv("LAW_TOOLS_CORE_DOWNLOAD_CACHE", str(tmp_path / "cache"))
+        calls = {"n": 0}
+
+        async def fetcher(remainder: str) -> tuple[bytes, str]:
+            calls["n"] += 1
+            return b"from-upstream", f"{remainder}.pdf"
+
+        downloads.register_source("src", fetcher)
+        downloads.set_blob_store(_NoReadStore())
+        try:
+            content, _ = asyncio.run(fetch_with_cache("src/X"))
+            assert content == b"from-upstream"
+            assert calls["n"] == 1
+        finally:
+            downloads.set_blob_store(None)
 
 
 def _make_fetcher(payloads: dict[str, tuple[bytes, str] | Exception]):
@@ -232,6 +334,18 @@ class TestDownloadBulkResponse:
         # Local mode: file_path, no download_url.
         assert "file_path" in payload
         assert os.path.exists(payload["file_path"])
+
+    def test_n1_fetch_failure_raises_bulk_error(self) -> None:
+        # A single-item bulk has nothing to partially succeed, so a fetch
+        # failure must raise BulkDownloadError (same contract as the all-failed
+        # multi-item path) rather than leaking the raw fetcher exception.
+        item = BulkItem("only", "src/only", {})
+        fetcher = _make_fetcher({"only": RuntimeError("HTTP 504")})
+        with pytest.raises(BulkDownloadError, match="All 1 items failed") as excinfo:
+            asyncio.run(download_bulk_response([item], fetcher, container_label="solo"))
+        # The underlying error is chained for transient-outage detection.
+        assert isinstance(excinfo.value.__cause__, RuntimeError)
+        assert "HTTP 504" in str(excinfo.value)
 
     def test_n_many_local_mode_returns_zip_tempfile(self, tmp_path, monkeypatch) -> None:
         monkeypatch.delenv("LAW_TOOLS_CORE_PUBLIC_URL", raising=False)
@@ -703,6 +817,10 @@ class _FakeBlobStore:
 
     def sign_url(self, key: str) -> str:
         return f"https://storage.example.com/{key}?X-Goog-Signature=fake"
+
+    async def read_object(self, key: str) -> bytes | None:
+        entry = self.objects.get(key)
+        return entry[0] if entry is not None else None
 
 
 @pytest.fixture

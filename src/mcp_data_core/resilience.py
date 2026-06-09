@@ -14,7 +14,7 @@ from tenacity import (
     wait_exponential_jitter,
 )
 
-from .exceptions import RateLimitError
+from .exceptions import ApiError, RateLimitError
 
 T = TypeVar("T")
 P = ParamSpec("P")
@@ -24,9 +24,22 @@ RETRYABLE_STATUS_CODES = frozenset({429, 500, 502, 503, 504})
 
 def is_retryable_error(exc: BaseException) -> bool:
     """Check if an exception should trigger a retry."""
+    # RateLimitError (429) is always retryable, even if no status_code was
+    # attached — backoff is the correct response regardless.
+    if isinstance(exc, RateLimitError):
+        return True
+    # Typed API errors carry the upstream status code. BaseAsyncClient raises
+    # these (via ``_raise_for_status``) instead of httpx's HTTPStatusError, so
+    # this — not the HTTPStatusError branch below — is what actually gates
+    # retries on transient 5xx (e.g. USPTO's data-documents 504s) in practice.
+    if isinstance(exc, ApiError):
+        return exc.status_code in RETRYABLE_STATUS_CODES
+    # Defensive: a caller using response.raise_for_status() directly would
+    # surface httpx.HTTPStatusError instead of our typed error.
     if isinstance(exc, httpx.HTTPStatusError):
         return exc.response.status_code in RETRYABLE_STATUS_CODES
-    if isinstance(exc, httpx.TransportError | RateLimitError):
+    # Connection/read/write timeouts and other transport-level failures.
+    if isinstance(exc, httpx.TransportError):
         return True
     return False
 
