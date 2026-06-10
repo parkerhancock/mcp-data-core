@@ -112,6 +112,24 @@ class TestBuildDownloadUrl:
         out = downloads.build_download_url("patents/X", label="Patent PDF")
         assert out.startswith("Patent PDF\n\nDownload:")
 
+    def test_download_base_url_overrides_public_url(self, monkeypatch) -> None:
+        # When DOWNLOAD_BASE_URL is set, links point at it (not PUBLIC_URL),
+        # so all downloads come from one host distinct from the OAuth origin.
+        monkeypatch.setenv("LAW_TOOLS_CORE_API_KEY", "secret")
+        monkeypatch.setenv("LAW_TOOLS_CORE_PUBLIC_URL", "https://mcp.example.com")
+        monkeypatch.setenv("LAW_TOOLS_CORE_DOWNLOAD_BASE_URL", "https://downloads.example.com")
+        url = downloads.build_download_url("patents/X")
+        assert url.startswith("https://downloads.example.com/downloads/patents/X?key=")
+
+    def test_download_base_url_falls_back_to_public_url(self, monkeypatch) -> None:
+        # Unset DOWNLOAD_BASE_URL → existing behavior (PUBLIC_URL host).
+        monkeypatch.setenv("LAW_TOOLS_CORE_API_KEY", "secret")
+        monkeypatch.setenv("LAW_TOOLS_CORE_PUBLIC_URL", "https://mcp.example.com")
+        monkeypatch.delenv("LAW_TOOLS_CORE_DOWNLOAD_BASE_URL", raising=False)
+        monkeypatch.delenv("LAW_TOOLS_DOWNLOAD_BASE_URL", raising=False)
+        url = downloads.build_download_url("patents/X")
+        assert url.startswith("https://mcp.example.com/downloads/patents/X?key=")
+
 
 class TestDownloadResponse:
     async def test_local_mode_writes_tempfile(self, tmp_path, monkeypatch) -> None:

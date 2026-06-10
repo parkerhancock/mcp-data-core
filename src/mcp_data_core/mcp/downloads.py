@@ -25,7 +25,10 @@ Two rules govern how tool responses handle URLs:
 
 Env vars (all accept a ``LAW_TOOLS_*`` legacy alias)::
 
-    LAW_TOOLS_CORE_PUBLIC_URL        base URL for download links
+    LAW_TOOLS_CORE_PUBLIC_URL        base URL for the app (OAuth/MCP origin)
+    LAW_TOOLS_CORE_DOWNLOAD_BASE_URL base URL for download links (defaults to
+                                     PUBLIC_URL; set to serve downloads from a
+                                     separate host, e.g. a CDN/Worker subdomain)
     LAW_TOOLS_CORE_API_KEY           secret for HMAC signing
     LAW_TOOLS_CORE_DOWNLOAD_CACHE    on-disk cache dir (default: ~/.cache/mcp_data_core/downloads)
     LAW_TOOLS_CORE_DOWNLOAD_TTL_SECONDS  HMAC rotation bucket (default 86400)
@@ -70,6 +73,20 @@ RESOURCE_SCHEME = "pca"
 
 def _public_url() -> str:
     return _env.get("PUBLIC_URL", "").rstrip("/")
+
+
+def _download_base_url() -> str:
+    """Base URL for minted ``/downloads/{path}?key=`` links.
+
+    Defaults to ``PUBLIC_URL`` (the app's own origin). A deployment can set
+    ``LAW_TOOLS_CORE_DOWNLOAD_BASE_URL`` to serve downloads from a separate
+    host — e.g. a CDN/Worker subdomain that reverse-proxies this app's
+    ``/downloads`` route — so egress-restricted consumers only need ONE
+    allowlist entry for all download traffic, distinct from the MCP/OAuth
+    origin. Falls back to ``PUBLIC_URL`` when unset, so existing deployments
+    are unaffected.
+    """
+    return _env.get("DOWNLOAD_BASE_URL", "").rstrip("/") or _public_url()
 
 
 def _secret() -> str:
@@ -369,7 +386,7 @@ def build_download_url(
             leaks are valid until ``LAW_TOOLS_CORE_API_KEY`` rotates.
     """
     resource_path = resource_path.strip("/")
-    public = _public_url()
+    public = _download_base_url()
 
     if public:
         bucket: int | str | None = _PERMANENT_BUCKET if permanent else None
@@ -393,7 +410,7 @@ async def build_download_url_or_fetch(
     Async version that actually fetches in local mode.
     """
     resource_path = resource_path.strip("/")
-    public = _public_url()
+    public = _download_base_url()
 
     if public:
         sig = sign_path(resource_path)
@@ -480,7 +497,7 @@ async def download_response(
     # handler reads from the same per-doc cache as the HTTP route, so
     # we want them warm regardless of which path a client picks.
     _cache_put(resource_path, content, filename=filename)
-    if _public_url():
+    if _download_base_url():
         payload["download_url"] = build_download_url(resource_path, permanent=permanent)
         if not permanent:
             expiry = _bucket_expiry_epoch(_current_bucket())
@@ -813,7 +830,7 @@ async def download_bulk_response(
         # would dangle because resources/read has no fetcher to call.
         elif _match_source(item.resource_path) is not None:
             entry["resource_uri"] = build_resource_uri(item.resource_path)
-            if _public_url():
+            if _download_base_url():
                 entry["download_url"] = build_download_url(item.resource_path)
         async with manifest_lock:
             manifest_entries[item.item_id] = entry
@@ -869,7 +886,7 @@ async def download_bulk_response(
         )
         payload["download_url"] = store.sign_url(bulk_key)
         payload["expires_at"] = _store_expires_at_iso()
-    elif _public_url():
+    elif _download_base_url():
         bulk_id = uuid.uuid4().hex
         bulk_dir = _bulk_zip_dir()
         await asyncio.to_thread(bulk_dir.mkdir, parents=True, exist_ok=True)
