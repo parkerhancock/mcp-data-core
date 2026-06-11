@@ -195,8 +195,9 @@ class _ReadThroughStore:
 class _NoReadStore:
     """Older store that predates ``read_object`` — read-through must skip it."""
 
-    async def put(self, key, content, *, content_type="application/octet-stream", filename=None):
-        ...
+    async def put(
+        self, key, content, *, content_type="application/octet-stream", filename=None
+    ): ...
 
     def sign_url(self, key: str) -> str:
         return f"https://store.test/{key}"
@@ -229,9 +230,7 @@ class TestFetchWithCache:
         with pytest.raises(ValueError, match="No registered fetcher"):
             asyncio.run(fetch_with_cache("nope/X"))
 
-    def test_read_through_serves_store_bytes_without_upstream(
-        self, tmp_path, monkeypatch
-    ) -> None:
+    def test_read_through_serves_store_bytes_without_upstream(self, tmp_path, monkeypatch) -> None:
         # Local-disk miss + durable store hit → serve the stored bytes and
         # never touch the upstream. This is what makes a retry after a partial
         # outage reuse the docs that already succeeded (on another instance).
@@ -261,9 +260,7 @@ class TestFetchWithCache:
         finally:
             downloads.set_blob_store(None)
 
-    def test_read_through_store_miss_falls_back_to_upstream(
-        self, tmp_path, monkeypatch
-    ) -> None:
+    def test_read_through_store_miss_falls_back_to_upstream(self, tmp_path, monkeypatch) -> None:
         monkeypatch.setenv("LAW_TOOLS_CORE_DOWNLOAD_CACHE", str(tmp_path / "cache"))
         calls = {"n": 0}
 
@@ -283,9 +280,7 @@ class TestFetchWithCache:
         finally:
             downloads.set_blob_store(None)
 
-    def test_read_through_skipped_when_store_lacks_read_object(
-        self, tmp_path, monkeypatch
-    ) -> None:
+    def test_read_through_skipped_when_store_lacks_read_object(self, tmp_path, monkeypatch) -> None:
         # A store predating read_object must not break fetch_with_cache.
         monkeypatch.setenv("LAW_TOOLS_CORE_DOWNLOAD_CACHE", str(tmp_path / "cache"))
         calls = {"n": 0}
@@ -868,9 +863,7 @@ class TestInjectedBlobStore:
         )
         # Bytes landed in the store under the resource path.
         assert "uspto/applications/13842859/documents/ABC" in injected_store.objects
-        stored, ctype, fname = injected_store.objects[
-            "uspto/applications/13842859/documents/ABC"
-        ]
+        stored, ctype, fname = injected_store.objects["uspto/applications/13842859/documents/ABC"]
         assert stored == b"%PDF-1.7 fake"
         assert ctype == "application/pdf"
         assert fname == "doc.pdf"
@@ -887,9 +880,7 @@ class TestInjectedBlobStore:
         # Store mode must NOT touch the local disk cache.
         cache = tmp_path / "cache"
         monkeypatch.setenv("LAW_TOOLS_CORE_DOWNLOAD_CACHE", str(cache))
-        await downloads.download_response(
-            "patents/US10000000B2", b"bytes", filename="p.pdf"
-        )
+        await downloads.download_response("patents/US10000000B2", b"bytes", filename="p.pdf")
         assert not cache.exists()
 
     async def test_bulk_n1_short_circuit_uses_store(self, injected_store) -> None:
@@ -919,25 +910,146 @@ class TestInjectedBlobStore:
         # Each doc was uploaded individually so its per-item URL is durable.
         assert "uspto/applications/1/documents/A" in injected_store.objects
         assert "uspto/applications/1/documents/B" in injected_store.objects
-        # The zip itself is in the store under a bulk_zips/ key.
-        zip_keys = [k for k in injected_store.objects if k.startswith("bulk_zips/")]
+        # The zip itself is in the store under a bulk_zips/ key, alongside a
+        # .name sidecar carrying the user-facing filename for the route.
+        zip_keys = [
+            k
+            for k in injected_store.objects
+            if k.startswith("bulk_zips/") and not k.endswith(".name")
+        ]
         assert len(zip_keys) == 1
+        assert f"{zip_keys[0]}.name" in injected_store.objects
+        assert injected_store.objects[f"{zip_keys[0]}.name"][0] == b"bundle.zip"
         zip_bytes, zip_ctype, _ = injected_store.objects[zip_keys[0]]
         assert zip_ctype == "application/zip"
         with zipfile.ZipFile(io.BytesIO(zip_bytes)) as zf:
             assert len(zf.namelist()) == 2
 
-    async def test_clearing_store_restores_legacy_path(
-        self, tmp_path, monkeypatch
-    ) -> None:
+    async def test_clearing_store_restores_legacy_path(self, tmp_path, monkeypatch) -> None:
         # With no store injected and no PUBLIC_URL, download_response falls
         # back to the local tempfile path (file_path, no download_url).
         downloads.set_blob_store(None)
         monkeypatch.delenv("LAW_TOOLS_CORE_PUBLIC_URL", raising=False)
         monkeypatch.delenv("LAW_TOOLS_PUBLIC_URL", raising=False)
         monkeypatch.setenv("LAW_TOOLS_CORE_DOWNLOAD_CACHE", str(tmp_path / "cache"))
-        payload = await downloads.download_response(
-            "patents/US9999999B2", b"x", filename="p.pdf"
-        )
+        payload = await downloads.download_response("patents/US9999999B2", b"x", filename="p.pdf")
         assert "download_url" not in payload
         assert "file_path" in payload
+
+
+class TestStoreRoutedDownloads:
+    """Option C: durable store for bytes, but downloads served back through
+    this host's /downloads route so they share ONE egress domain.
+
+    Opt-in via an explicit LAW_TOOLS_CORE_DOWNLOAD_BASE_URL. With only
+    PUBLIC_URL set (no explicit base), store-backed downloads keep their
+    direct signed URL — covered by TestInjectedBlobStore.
+    """
+
+    def _route_target(self, url: str) -> tuple[str, str]:
+        """Split a minted route URL into (resource_path, key) for TestClient."""
+        from urllib.parse import parse_qs, urlsplit
+
+        parts = urlsplit(url)
+        assert parts.path.startswith("/downloads/")
+        resource_path = parts.path[len("/downloads/") :]
+        key = parse_qs(parts.query)["key"][0]
+        return resource_path, key
+
+    async def test_download_response_routes_through_host_when_base_url_set(
+        self, injected_store, monkeypatch
+    ) -> None:
+        monkeypatch.setenv("LAW_TOOLS_CORE_API_KEY", "secret")
+        monkeypatch.setenv("LAW_TOOLS_CORE_PUBLIC_URL", "https://mcp.lawtools.cc")
+        monkeypatch.setenv("LAW_TOOLS_CORE_DOWNLOAD_BASE_URL", "https://downloads.lawtools.cc")
+        payload = await downloads.download_response(
+            "uspto/applications/13842859/documents/ABC",
+            b"%PDF-1.7 fake",
+            filename="doc.pdf",
+        )
+        # Bytes still land in the durable store...
+        assert "uspto/applications/13842859/documents/ABC" in injected_store.objects
+        # ...but the URL is the HMAC route on the downloads host, NOT the
+        # store's own domain — so the consumer allowlists one host.
+        url = payload["download_url"]
+        assert url.startswith("https://downloads.lawtools.cc/downloads/")
+        assert "storage.example.com" not in url
+        assert "?key=" in url
+        assert payload["expires_at"].endswith("Z")
+
+    def test_route_reads_single_doc_from_store_on_cache_miss(
+        self, injected_store, tmp_path, monkeypatch
+    ) -> None:
+        from starlette.testclient import TestClient
+
+        # Empty local cache (cross-instance scenario): bytes only exist in
+        # the store. The route must read_object them rather than 404 or
+        # re-fetch upstream (the PACER-charge / one-shot hazard).
+        monkeypatch.setenv("LAW_TOOLS_CORE_API_KEY", "secret")
+        monkeypatch.setenv("LAW_TOOLS_CORE_DOWNLOAD_CACHE", str(tmp_path / "cache"))
+        rp = "court/recap/doc-42"
+        injected_store.objects[rp] = (b"pacer-pdf-bytes", "application/pdf", "doc.pdf")
+
+        sig = downloads.sign_path(rp)
+        resp = TestClient(_build_app()).get(f"/downloads/{rp}?key={sig}")
+
+        assert resp.status_code == 200
+        assert resp.content == b"pacer-pdf-bytes"
+        assert "attachment" in resp.headers["Content-Disposition"]
+
+    def test_route_bulk_zip_reads_from_store_with_sidecar_name(
+        self, injected_store, tmp_path, monkeypatch
+    ) -> None:
+        from starlette.testclient import TestClient
+
+        monkeypatch.setenv("LAW_TOOLS_CORE_API_KEY", "secret")
+        monkeypatch.setenv("LAW_TOOLS_CORE_DOWNLOAD_CACHE", str(tmp_path / "cache"))
+        injected_store.objects["bulk_zips/feed01"] = (
+            b"zip-payload",
+            "application/zip",
+            None,
+        )
+        injected_store.objects["bulk_zips/feed01.name"] = (
+            b"my_bundle.zip",
+            "text/plain; charset=utf-8",
+            None,
+        )
+
+        sig = downloads.sign_path("bulk_zips/feed01")
+        resp = TestClient(_build_app()).get(f"/downloads/bulk_zips/feed01?key={sig}")
+
+        assert resp.status_code == 200
+        assert resp.content == b"zip-payload"
+        assert "my_bundle.zip" in resp.headers["Content-Disposition"]
+
+    async def test_bulk_response_routes_and_round_trips_end_to_end(
+        self, injected_store, tmp_path, monkeypatch
+    ) -> None:
+        from starlette.testclient import TestClient
+
+        monkeypatch.setenv("LAW_TOOLS_CORE_API_KEY", "secret")
+        monkeypatch.setenv("LAW_TOOLS_CORE_DOWNLOAD_CACHE", str(tmp_path / "cache"))
+        monkeypatch.setenv("LAW_TOOLS_CORE_DOWNLOAD_BASE_URL", "https://downloads.lawtools.cc")
+
+        async def fetcher(item: BulkItem) -> tuple[bytes, str]:
+            return f"body-{item.item_id}".encode(), f"{item.item_id}.pdf"
+
+        items = [
+            BulkItem(item_id="a", resource_path="sec/filings/1/A"),
+            BulkItem(item_id="b", resource_path="sec/filings/1/B"),
+        ]
+        payload = await download_bulk_response(items, fetcher, container_label="bundle")
+
+        # The zip URL points at the downloads host's route, not the store.
+        url = payload["download_url"]
+        assert url.startswith("https://downloads.lawtools.cc/downloads/bulk_zips/")
+        assert "storage.example.com" not in url
+
+        # GET it through the route → the assembled zip streams back from the
+        # store, proving the whole one-shot-bulk path survives a cache miss.
+        rp, key = self._route_target(url)
+        resp = TestClient(_build_app()).get(f"/downloads/{rp}?key={key}")
+        assert resp.status_code == 200
+        assert "bundle.zip" in resp.headers["Content-Disposition"]
+        with zipfile.ZipFile(io.BytesIO(resp.content)) as zf:
+            assert len(zf.namelist()) == 2

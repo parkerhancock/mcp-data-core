@@ -89,6 +89,19 @@ def _download_base_url() -> str:
     return _env.get("DOWNLOAD_BASE_URL", "").rstrip("/") or _public_url()
 
 
+def _explicit_download_base_url() -> str:
+    """The configured downloads host, WITHOUT the ``PUBLIC_URL`` fallback.
+
+    Routing durable-store (blob-store) downloads back through this server's
+    ``/downloads`` route — so every download shares one egress domain — is
+    opt-in: it happens only when the operator sets
+    ``LAW_TOOLS_CORE_DOWNLOAD_BASE_URL`` explicitly. With only ``PUBLIC_URL``
+    set, store-backed downloads keep their direct signed URL (server out of
+    the byte path), which is the prior behavior. Returns ``""`` when unset.
+    """
+    return _env.get("DOWNLOAD_BASE_URL", "").rstrip("/")
+
+
 def _secret() -> str:
     return _env.get("API_KEY", "")
 
@@ -437,6 +450,36 @@ async def build_download_url_or_fetch(
     return f"Downloaded file ({size_str}). Saved to {tmp.name}"
 
 
+def _store_download_url(resource_path: str, *, permanent: bool = False) -> tuple[str, str | None]:
+    """URL + guaranteed-expiry for a resource already persisted to the blob store.
+
+    Precedence:
+
+    * When ``LAW_TOOLS_CORE_DOWNLOAD_BASE_URL`` is set, mint the HMAC
+      ``/downloads/{path}?key=`` route URL. The bytes are durable in the
+      store, but the download is served back through *this* server (which
+      reads them via ``read_object``), so every download shares one egress
+      host instead of leaking the store's own domain (e.g.
+      ``storage.googleapis.com``). This is what lets an egress-restricted
+      consumer allowlist a single downloads domain.
+    * Otherwise fall back to the store's own direct signed URL — the
+      server stays out of the byte path entirely.
+
+    Returns ``(url, expires_at_iso_or_None)``; ``expires_at`` is ``None``
+    for permanent URLs.
+    """
+    if _explicit_download_base_url():
+        url = build_download_url(resource_path, permanent=permanent)
+        if permanent:
+            return url, None
+        expiry = _bucket_expiry_epoch(_current_bucket())
+        return url, datetime.fromtimestamp(expiry, tz=UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+    # Direct signed URL straight at the store object.
+    store = _blob_store
+    assert store is not None  # call sites guard this; narrows the type
+    return store.sign_url(resource_path), (None if permanent else _store_expires_at_iso())
+
+
 async def download_response(
     resource_path: str,
     content: bytes,
@@ -488,9 +531,10 @@ async def download_response(
             content_type=content_type,
             filename=filename,
         )
-        payload["download_url"] = store.sign_url(resource_path)
-        if not permanent:
-            payload["expires_at"] = _store_expires_at_iso()
+        url, expires_at = _store_download_url(resource_path, permanent=permanent)
+        payload["download_url"] = url
+        if expires_at is not None:
+            payload["expires_at"] = expires_at
         return payload
 
     # Cache the bytes in both transport modes — the MCP resources/read
@@ -776,9 +820,7 @@ async def download_bulk_response(
             # BulkDownloadError in the multi-item path below. Raise the same
             # error shape; the chained cause carries the (retried, enriched)
             # underlying error for transient-outage detection.
-            raise BulkDownloadError(
-                f"All 1 items failed to fetch (first error: {exc})."
-            ) from exc
+            raise BulkDownloadError(f"All 1 items failed to fetch (first error: {exc}).") from exc
         extras: dict = {**container_meta, "item_id": only.item_id, **only.metadata}
         return await download_response(
             only.resource_path,
@@ -820,7 +862,7 @@ async def download_bulk_response(
                 content_type=content_type_single,
                 filename=filename,
             )
-            entry["download_url"] = store.sign_url(item.resource_path)
+            entry["download_url"], _ = _store_download_url(item.resource_path)
             if _match_source(item.resource_path) is not None:
                 entry["resource_uri"] = build_resource_uri(item.resource_path)
         # Only advertise a resource_uri / per-item download_url for items
@@ -884,8 +926,18 @@ async def download_bulk_response(
             content_type="application/zip",
             filename=zip_filename,
         )
-        payload["download_url"] = store.sign_url(bulk_key)
-        payload["expires_at"] = _store_expires_at_iso()
+        # Filename sidecar: read_object only returns bytes, so persist the
+        # user-facing name separately for the /downloads route's
+        # Content-Disposition (mirrors the local-tempfile .name sidecar).
+        await store.put(
+            f"{bulk_key}.name",
+            zip_filename.encode(),
+            content_type="text/plain; charset=utf-8",
+        )
+        url, expires_at = _store_download_url(bulk_key)
+        payload["download_url"] = url
+        if expires_at is not None:
+            payload["expires_at"] = expires_at
     elif _download_base_url():
         bulk_id = uuid.uuid4().hex
         bulk_dir = _bulk_zip_dir()
@@ -902,9 +954,7 @@ async def download_bulk_response(
             "%Y-%m-%dT%H:%M:%SZ"
         )
     else:
-        tmp = tempfile.NamedTemporaryFile(
-            suffix=".zip", delete=False, prefix="mcp_data_core_bulk_"
-        )
+        tmp = tempfile.NamedTemporaryFile(suffix=".zip", delete=False, prefix="mcp_data_core_bulk_")
         tmp.write(zip_bytes)
         tmp.close()
         payload["file_path"] = tmp.name
@@ -1064,7 +1114,29 @@ def _maybe_reap_bulk_zips() -> None:
 
 
 async def _serve_bulk_zip(uuid_hex: str) -> Response:
-    """Stream a bulk zip from the tempfile dir and unlink on full delivery."""
+    """Stream a bulk zip from the durable store or the local tempfile dir."""
+    # Durable-store path (cloud): the zip and its name sidecar were uploaded
+    # under ``bulk_zips/{uuid_hex}`` and survive instance scale-down, so serve
+    # them straight back through this host (one egress domain). Falls through
+    # to the local tempfile path when no store is injected (VM/stdio).
+    store = _blob_store
+    if store is not None:
+        reader = getattr(store, "read_object", None)
+        if reader is not None:
+            bulk_key = f"bulk_zips/{uuid_hex}"
+            stored = await reader(bulk_key)
+            if stored is not None:
+                name_bytes = await reader(f"{bulk_key}.name")
+                filename = name_bytes.decode() if name_bytes else f"{uuid_hex}.zip"
+                return Response(
+                    content=stored,
+                    media_type="application/zip",
+                    headers={
+                        "Content-Disposition": f'attachment; filename="{filename}"',
+                        "Cache-Control": "no-store",
+                    },
+                )
+
     bulk_path = _bulk_zip_dir() / f"{uuid_hex}.zip"
     if not bulk_path.exists():
         return Response(
@@ -1131,6 +1203,30 @@ async def handle_download(request: Request) -> Response:
                 "Cache-Control": "private, max-age=3600",
             },
         )
+
+    # Durable-store read-through: bytes a prior call persisted (possibly on
+    # another autoscaled instance) are served straight back. This is what
+    # keeps the HMAC ``/downloads`` route correct on Cloud Run when a durable
+    # store is injected — without it a cross-instance cache miss would fall
+    # through to an upstream re-fetch (a real PACER charge) or, for one-shot
+    # bulk items / ad-hoc paths with no registered source, a spurious 404.
+    store = _blob_store
+    if store is not None:
+        reader = getattr(store, "read_object", None)
+        if reader is not None:
+            stored = await reader(resource_path)
+            if stored is not None:
+                source_match = _match_source(resource_path)
+                mime = source_match[0].mime_type if source_match else "application/octet-stream"
+                name = resource_path.rsplit("/", 1)[-1] or resource_path
+                return Response(
+                    content=stored,
+                    media_type=mime,
+                    headers={
+                        "Content-Disposition": f'attachment; filename="{name}"',
+                        "Cache-Control": "private, max-age=3600",
+                    },
+                )
 
     match = _match_source(resource_path)
     if match is None:
