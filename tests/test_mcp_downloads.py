@@ -644,6 +644,7 @@ class TestDownloadToolResult:
     async def test_returns_tool_result_with_resource_link(self, tmp_path, monkeypatch) -> None:
         monkeypatch.delenv("LAW_TOOLS_CORE_PUBLIC_URL", raising=False)
         monkeypatch.setenv("LAW_TOOLS_CORE_DOWNLOAD_CACHE", str(tmp_path / "cache"))
+        monkeypatch.setenv("LAW_TOOLS_CORE_RESOURCES_ENABLED", "1")
         result = await downloads.download_tool_result(
             "patents/US10000000B2",
             b"%PDF-1.4 hi",
@@ -667,6 +668,7 @@ class TestDownloadToolResult:
     async def test_extras_land_in_structured_content(self, tmp_path, monkeypatch) -> None:
         monkeypatch.delenv("LAW_TOOLS_CORE_PUBLIC_URL", raising=False)
         monkeypatch.setenv("LAW_TOOLS_CORE_DOWNLOAD_CACHE", str(tmp_path / "cache"))
+        monkeypatch.setenv("LAW_TOOLS_CORE_RESOURCES_ENABLED", "1")
         result = await downloads.download_tool_result(
             "patents/US1",
             b"x",
@@ -677,6 +679,53 @@ class TestDownloadToolResult:
         )
         assert result.structured_content["source"] == "google_patents"
         assert result.structured_content["patent_number"] == "US1"
+
+    async def test_default_emits_text_url_and_resource_link(self, tmp_path, monkeypatch) -> None:
+        """Default (flag unset → resources ON): the full spec shape — the
+        signed URL in a TextContent block AND a resource_link AND
+        structured_content."""
+        monkeypatch.delenv("LAW_TOOLS_CORE_RESOURCES_ENABLED", raising=False)
+        monkeypatch.delenv("LAW_TOOLS_RESOURCES_ENABLED", raising=False)
+        monkeypatch.setenv("LAW_TOOLS_CORE_API_KEY", "secret")
+        monkeypatch.setenv("LAW_TOOLS_CORE_PUBLIC_URL", "https://mcp.example.com")
+        monkeypatch.setenv("LAW_TOOLS_CORE_DOWNLOAD_CACHE", str(tmp_path / "cache"))
+        result = await downloads.download_tool_result(
+            "patents/US10000000B2",
+            b"%PDF-1.4 hi",
+            filename="US10000000B2.pdf",
+            content_type="application/pdf",
+        )
+        # Text floor always present and carries the signed URL.
+        texts = [c for c in (result.content or []) if c.type == "text"]
+        assert len(texts) == 1
+        assert "https://mcp.example.com/downloads/patents/US10000000B2?key=" in texts[0].text
+        # Resource_link enhancement + structured_content present by default.
+        links = [c for c in (result.content or []) if c.type == "resource_link"]
+        assert len(links) == 1
+        assert str(links[0].uri) == "pca://patents/US10000000B2"
+        assert result.structured_content["download_url"].startswith("https://mcp.example.com/")
+
+    async def test_disabled_is_text_only_no_resource_link(self, tmp_path, monkeypatch) -> None:
+        """RESOURCES_ENABLED=0: the signed URL rides in a TextContent block,
+        no resource_link, no structured_content — the shape for surfaces that
+        reject non-HTTP links."""
+        monkeypatch.setenv("LAW_TOOLS_CORE_RESOURCES_ENABLED", "0")
+        monkeypatch.setenv("LAW_TOOLS_CORE_API_KEY", "secret")
+        monkeypatch.setenv("LAW_TOOLS_CORE_PUBLIC_URL", "https://mcp.example.com")
+        monkeypatch.setenv("LAW_TOOLS_CORE_DOWNLOAD_CACHE", str(tmp_path / "cache"))
+        result = await downloads.download_tool_result(
+            "patents/US10000000B2",
+            b"%PDF-1.4 hi",
+            filename="US10000000B2.pdf",
+            content_type="application/pdf",
+        )
+        assert result.structured_content is None
+        links = [c for c in (result.content or []) if c.type == "resource_link"]
+        assert links == []
+        texts = [c for c in (result.content or []) if c.type == "text"]
+        assert len(texts) == 1
+        assert "https://mcp.example.com/downloads/patents/US10000000B2?key=" in texts[0].text
+        assert "US10000000B2.pdf" in texts[0].text
 
 
 class TestReadResource:
@@ -707,6 +756,7 @@ class TestDownloadBulkToolResult:
     def test_n1_short_circuits_to_single_resource_link(self, tmp_path, monkeypatch) -> None:
         monkeypatch.delenv("LAW_TOOLS_CORE_PUBLIC_URL", raising=False)
         monkeypatch.setenv("LAW_TOOLS_CORE_DOWNLOAD_CACHE", str(tmp_path / "cache"))
+        monkeypatch.setenv("LAW_TOOLS_CORE_RESOURCES_ENABLED", "1")
 
         async def fetcher(item: BulkItem) -> tuple[bytes, str]:
             return b"only", "only.pdf"
@@ -724,6 +774,7 @@ class TestDownloadBulkToolResult:
     def test_n_many_returns_per_item_links(self, tmp_path, monkeypatch) -> None:
         monkeypatch.delenv("LAW_TOOLS_CORE_PUBLIC_URL", raising=False)
         monkeypatch.setenv("LAW_TOOLS_CORE_DOWNLOAD_CACHE", str(tmp_path / "cache"))
+        monkeypatch.setenv("LAW_TOOLS_CORE_RESOURCES_ENABLED", "1")
 
         # Register a source so the manifest entries get resource_uri.
         async def fetcher_for_registry(_remainder: str) -> tuple[bytes, str]:
@@ -759,6 +810,7 @@ class TestDownloadBulkToolResult:
         fetcher to call."""
         monkeypatch.delenv("LAW_TOOLS_CORE_PUBLIC_URL", raising=False)
         monkeypatch.setenv("LAW_TOOLS_CORE_DOWNLOAD_CACHE", str(tmp_path / "cache"))
+        monkeypatch.setenv("LAW_TOOLS_CORE_RESOURCES_ENABLED", "1")
 
         async def fetcher(item: BulkItem) -> tuple[bytes, str]:
             return item.item_id.encode(), f"{item.item_id}.pdf"
@@ -775,6 +827,29 @@ class TestDownloadBulkToolResult:
         # No ResourceLink blocks emitted for unregistered paths.
         links = [c for c in (result.content or []) if c.type == "resource_link"]
         assert links == []
+
+    def test_disabled_is_text_only_with_zip_url(self, tmp_path, monkeypatch) -> None:
+        """RESOURCES_ENABLED=0: bulk result is a single TextContent summary
+        carrying the signed zip URL, no resource_link blocks."""
+        monkeypatch.setenv("LAW_TOOLS_CORE_RESOURCES_ENABLED", "0")
+        monkeypatch.setenv("LAW_TOOLS_CORE_API_KEY", "secret")
+        monkeypatch.setenv("LAW_TOOLS_CORE_PUBLIC_URL", "https://mcp.example.com")
+        monkeypatch.setenv("LAW_TOOLS_CORE_DOWNLOAD_CACHE", str(tmp_path / "cache"))
+
+        async def fetcher(item: BulkItem) -> tuple[bytes, str]:
+            return item.item_id.encode(), f"{item.item_id}.pdf"
+
+        items = [BulkItem("A", "patents/USA", {}), BulkItem("B", "patents/USB", {})]
+        result = asyncio.run(
+            downloads.download_bulk_tool_result(items, fetcher, container_label="bundle")
+        )
+        assert result.structured_content is None
+        links = [c for c in (result.content or []) if c.type == "resource_link"]
+        assert links == []
+        texts = [c for c in (result.content or []) if c.type == "text"]
+        assert len(texts) == 1
+        assert "https://mcp.example.com/downloads/bulk_zips/" in texts[0].text
+        assert "2 of 2" in texts[0].text
 
 
 class TestSweeperThrottle:

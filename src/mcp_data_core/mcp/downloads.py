@@ -54,7 +54,7 @@ from typing import Protocol, runtime_checkable
 
 from fastmcp.resources import ResourceContent
 from fastmcp.tools.tool import ToolResult  # ty: ignore[unresolved-import]
-from mcp.types import Annotations, ResourceLink
+from mcp.types import Annotations, ResourceLink, TextContent
 from starlette.requests import Request
 from starlette.responses import Response, StreamingResponse
 
@@ -87,6 +87,27 @@ def _download_base_url() -> str:
     are unaffected.
     """
     return _env.get("DOWNLOAD_BASE_URL", "").rstrip("/") or _public_url()
+
+
+def _resources_enabled() -> bool:
+    """Whether to emit MCP ``resource_link`` content blocks in download results.
+
+    The signed HTTP ``download_url`` is *always* present as a ``TextContent``
+    block — the universally-supported floor required by the MCP spec's
+    structured-content backwards-compat rule. This gates the ``resource_link``
+    *enhancement* layered on top, which resource-aware clients follow via
+    ``resources/read``.
+
+    Default ON: download tools return the full spec shape (text URL +
+    ``resource_link`` + ``structured_content``); conformant clients that don't
+    resolve links simply ignore them. Set
+    ``LAW_TOOLS_CORE_RESOURCES_ENABLED=0`` (``false``/``no``/``off``) on a
+    deployment whose clients reject tool-returned links rather than ignoring
+    them — e.g. the remote-MCP connector behind claude.ai, which replaces an
+    unsupported link with "Resource links are not currently supported" — to
+    fall back to a clean text-only result.
+    """
+    return _env.get("RESOURCES_ENABLED", "").strip().lower() not in {"0", "false", "no", "off"}
 
 
 def _explicit_download_base_url() -> str:
@@ -595,6 +616,69 @@ def _make_resource_link(
     )
 
 
+def _human_size(num_bytes: int | None) -> str:
+    if not num_bytes:
+        return ""
+    units = ["B", "KB", "MB", "GB"]
+    size = float(num_bytes)
+    for unit in units:
+        if size < 1024 or unit == units[-1]:
+            return f"{size:.0f} {unit}" if unit == "B" else f"{size:.1f} {unit}"
+        size /= 1024
+    return f"{num_bytes} B"
+
+
+def _download_text_block(payload: dict) -> TextContent:
+    """Render a download payload as a model-readable ``TextContent`` block.
+
+    The universally-supported floor for download tools: every MCP client
+    surfaces text, so the signed HTTP ``download_url`` always reaches the
+    model here, regardless of ``resource_link`` support. Handles single-doc
+    payloads (``download_response``), bulk payloads (``download_bulk_response``,
+    keyed by ``manifest``), and local/stdio mode (``file_path``).
+    """
+    lines: list[str] = []
+    manifest = payload.get("manifest")
+    if manifest is not None:
+        # Bulk payload.
+        ok = payload.get("ok_count", 0)
+        total = payload.get("item_count", len(manifest))
+        errors = payload.get("error_count", 0)
+        head = f"{ok} of {total} document(s) ready"
+        if errors:
+            head += f" ({errors} failed)"
+        zip_size = _human_size(payload.get("size_bytes"))
+        head += f" — zip {zip_size}" if zip_size else ""
+        lines.append(head + ".")
+        url = payload.get("download_url") or payload.get("file_path")
+        if url:
+            label = "Download (zip)" if payload.get("download_url") else "Saved to"
+            lines.append(f"{label}: {url}")
+        if payload.get("expires_at"):
+            lines.append(f"Link expires: {payload['expires_at']}")
+        # Per-document URLs, when the deployment minted them.
+        per_item = [
+            f"  - {e.get('filename') or e.get('item_id')}: {e['download_url']}"
+            for e in manifest
+            if e.get("status") == "ok" and e.get("download_url")
+        ]
+        if per_item:
+            lines.append("Per-document links:")
+            lines.extend(per_item)
+    else:
+        # Single-doc payload.
+        name = payload.get("filename", "document")
+        size = _human_size(payload.get("size_bytes"))
+        lines.append(f"{name}" + (f" ({size})" if size else "") + " ready.")
+        url = payload.get("download_url") or payload.get("file_path")
+        if url:
+            label = "Download" if payload.get("download_url") else "Saved to"
+            lines.append(f"{label}: {url}")
+        if payload.get("expires_at"):
+            lines.append(f"Link expires: {payload['expires_at']}")
+    return TextContent(type="text", text="\n".join(lines))
+
+
 async def download_tool_result(
     resource_path: str,
     content: bytes,
@@ -606,19 +690,29 @@ async def download_tool_result(
     last_modified: str | None = None,
     **extras: object,
 ) -> ToolResult:
-    """Build a dual-transport ``ToolResult`` for a downloadable artifact.
+    """Build a ``ToolResult`` for a downloadable artifact.
 
-    Returns a ``ToolResult`` carrying:
+    The ``content`` always leads with a ``TextContent`` block carrying the
+    signed HTTP ``download_url`` (the universally-supported floor — every MCP
+    client surfaces text, so the URL reaches the model regardless of
+    ``resource_link`` support; see the MCP spec's structured-content
+    backwards-compat rule).
 
-    - ``content``: a ``ResourceLink`` content block pointing at
-      ``pca://{resource_path}``. Resource-aware MCP clients (e.g. Claude
-      CoWork) follow this via ``resources/read`` over the existing MCP
-      session — no separate HTTP fetch, no domain allowlist.
+    When ``LAW_TOOLS_CORE_RESOURCES_ENABLED`` is set (see
+    :func:`_resources_enabled`), the result additionally carries:
+
+    - a ``ResourceLink`` content block pointing at ``pca://{resource_path}``,
+      which resource-aware MCP clients follow via ``resources/read`` over the
+      existing MCP session — no separate HTTP fetch, no domain allowlist; and
     - ``structured_content``: the same dict returned by
-      :func:`download_response`, with ``download_url`` (when
-      ``LAW_TOOLS_CORE_PUBLIC_URL`` is set), ``resource_uri``,
-      ``expires_at`` (rotating URLs), ``filename``, ``content_type``,
-      ``size_bytes``, plus any ``extras``.
+      :func:`download_response` (``download_url``, ``resource_uri``,
+      ``expires_at``, ``filename``, ``content_type``, ``size_bytes``, plus any
+      ``extras``), for programmatic/code-mode clients.
+
+    With resources disabled (the default), the result is text-only — no
+    ``resource_link``, no ``structured_content`` — so surfaces that reject
+    non-HTTP links (or drop ``content`` text when ``structuredContent`` is
+    present) still see the URL.
 
     Callers that need to mutate the payload before returning (e.g. add a
     ``source`` field) can pass it via ``**extras`` or skip this wrapper
@@ -632,6 +726,9 @@ async def download_tool_result(
         permanent=permanent,
         **extras,
     )
+    text = _download_text_block(payload)
+    if not _resources_enabled():
+        return ToolResult(content=[text])
     link = _make_resource_link(
         uri=payload["resource_uri"],
         name=filename,
@@ -640,7 +737,7 @@ async def download_tool_result(
         description=description,
         last_modified=last_modified,
     )
-    return ToolResult(content=[link], structured_content=payload)
+    return ToolResult(content=[text, link], structured_content=payload)
 
 
 async def read_resource(resource_path: str) -> list[ResourceContent]:
@@ -973,17 +1070,23 @@ async def download_bulk_tool_result(
 ) -> ToolResult:
     """Bulk-download companion to :func:`download_tool_result`.
 
-    Wraps :func:`download_bulk_response` and returns a ``ToolResult`` whose:
+    Wraps :func:`download_bulk_response`. The ``content`` always leads with a
+    ``TextContent`` block summarizing the batch (zip ``download_url``, counts,
+    and per-document URLs when minted) — the universally-supported floor.
 
-    - ``content`` carries per-item ``ResourceLink`` blocks, one per
-      successfully fetched item. Resource-aware clients follow these
-      via ``resources/read`` over MCP — the per-doc transport path
-      that bypasses the bulk-zip cap problem (large archives can blow
-      past JSON-RPC message limits on common clients).
-    - ``structured_content`` carries the same dict
-      :func:`download_bulk_response` returns: ``download_url`` (the zip,
-      for URL-comfortable clients), ``manifest`` (with per-item
-      ``resource_uri`` and ``download_url`` echoes), and the counts.
+    When ``LAW_TOOLS_CORE_RESOURCES_ENABLED`` is set (see
+    :func:`_resources_enabled`), the result additionally carries:
+
+    - per-item ``ResourceLink`` blocks, one per successfully fetched item, so
+      resource-aware clients follow them via ``resources/read`` over MCP — the
+      per-doc transport path that bypasses the bulk-zip cap problem (large
+      archives can blow past JSON-RPC message limits); and
+    - ``structured_content`` carrying the same dict
+      :func:`download_bulk_response` returns: ``download_url`` (the zip),
+      ``manifest`` (with per-item ``resource_uri`` and ``download_url``
+      echoes), and the counts.
+
+    With resources disabled (the default), the result is text-only.
 
     n=1 short-circuits to a single-doc ``ToolResult`` (same shape as
     :func:`download_tool_result`).
@@ -996,7 +1099,10 @@ async def download_bulk_tool_result(
         content_type_single=content_type_single,
         max_concurrency=max_concurrency,
     )
-    blocks: list[ResourceLink] = []
+    text = _download_text_block(payload)
+    if not _resources_enabled():
+        return ToolResult(content=[text])
+    blocks: list[TextContent | ResourceLink] = [text]
     manifest = payload.get("manifest")
     if manifest is None:
         # n=1 short-circuit — payload is a single-doc download_response

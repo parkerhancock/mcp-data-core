@@ -10,6 +10,11 @@ Env vars (all optional; deployment-specific):
     LAW_TOOLS_CORE_LOG_DIR      directory for tool-call JSONL logs
     LAW_TOOLS_CORE_DOWNLOAD_CACHE      on-disk cache dir for downloads
     LAW_TOOLS_CORE_DOWNLOAD_TTL_SECONDS HMAC rotation bucket (default 86400)
+    LAW_TOOLS_CORE_RESOURCES_ENABLED   emit MCP resource_link blocks in
+                                       download results (default ON; set to
+                                       0/false/no/off for text-only — the
+                                       signed HTTP URL is always present
+                                       either way)
 
 All variables accept a legacy ``LAW_TOOLS_*`` alias for backward
 compatibility with pre-split law-tools deployments.
