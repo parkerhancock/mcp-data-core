@@ -28,7 +28,7 @@ work.
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Awaitable, Callable, Sequence
 from typing import TYPE_CHECKING
 
 from fastmcp.exceptions import ToolError
@@ -144,18 +144,42 @@ def make_auth(
     return None
 
 
-def make_domain_gate_middleware(allowed_domains: Sequence[str]) -> Middleware:
-    """Middleware that restricts Google-authenticated callers by email domain.
+# Async predicate that returns True when an (already lowercased, already
+# email-verified) address is an individually-approved exception to the
+# domain allowlist. Lets a deployment back its exception list with a
+# runtime store (Firestore, a DB, etc.) without coupling this package to
+# any specific backend.
+DynamicEmailCheck = Callable[[str], Awaitable[bool]]
+
+
+def make_domain_gate_middleware(
+    allowed_domains: Sequence[str],
+    allowed_emails: Sequence[str] = (),
+    dynamic_email_allowed: DynamicEmailCheck | None = None,
+) -> Middleware:
+    """Middleware that restricts Google-authenticated callers by email.
 
     Static-token callers (no email claim) always pass through — they are
     service accounts. Google-authenticated callers must have
-    ``email_verified == True`` and an email ending in one of
-    ``allowed_domains``.
+    ``email_verified == True`` and then satisfy one of, in order:
+
+    1. an email whose domain is in ``allowed_domains``;
+    2. an exact email in ``allowed_emails`` (static, code-reviewed
+       exceptions to the domain rule);
+    3. ``dynamic_email_allowed(email)`` returning ``True`` (runtime
+       exceptions, e.g. a Firestore-backed allowlist).
 
     Args:
-        allowed_domains: Bare domains (e.g. ``["example.com"]``). An
-            empty list disables the gate entirely; the middleware
-            becomes a no-op.
+        allowed_domains: Bare domains (e.g. ``["example.com"]``).
+        allowed_emails: Exact addresses allowed regardless of domain.
+            Matched case-insensitively.
+        dynamic_email_allowed: Optional async predicate consulted only
+            when the domain and static-email checks both miss. It
+            receives the lowercased address. Any exception it raises is
+            treated as "not allowed" (fail closed) by the caller.
+
+    When ``allowed_domains``, ``allowed_emails``, and
+    ``dynamic_email_allowed`` are all empty/``None`` the gate is a no-op.
 
     Note:
         Google's ``hd`` parameter is a UX hint, not a security
@@ -163,18 +187,31 @@ def make_domain_gate_middleware(allowed_domains: Sequence[str]) -> Middleware:
         ``allowed_email_domains`` in :func:`make_auth` with this
         middleware when you need enforcement.
     """
-    normalized = tuple(d.lower().lstrip("@") for d in allowed_domains)
-    return _DomainGate(normalized)
+    normalized_domains = tuple(d.lower().lstrip("@") for d in allowed_domains)
+    normalized_emails = frozenset(e.lower() for e in allowed_emails)
+    return _DomainGate(normalized_domains, normalized_emails, dynamic_email_allowed)
 
 
 class _DomainGate(Middleware):
-    """Reject tool calls whose Google claims don't match the domain allowlist."""
+    """Reject tool calls whose Google claims don't match the allowlist."""
 
-    def __init__(self, allowed_domains: tuple[str, ...]) -> None:
+    def __init__(
+        self,
+        allowed_domains: tuple[str, ...],
+        allowed_emails: frozenset[str] = frozenset(),
+        dynamic_email_allowed: DynamicEmailCheck | None = None,
+    ) -> None:
         self._allowed_domains = allowed_domains
+        self._allowed_emails = allowed_emails
+        self._dynamic_email_allowed = dynamic_email_allowed
 
     async def on_call_tool(self, context: MiddlewareContext, call_next):  # noqa: ANN001
-        if not self._allowed_domains:
+        # All knobs empty → gate disabled.
+        if (
+            not self._allowed_domains
+            and not self._allowed_emails
+            and self._dynamic_email_allowed is None
+        ):
             return await call_next(context)
 
         token = get_access_token()
@@ -188,13 +225,20 @@ class _DomainGate(Middleware):
         if not claims.get("email_verified"):
             raise ToolError("Unauthorized: Google email not verified")
 
-        domain = email.rsplit("@", 1)[-1].lower()
-        if domain not in self._allowed_domains:
-            raise ToolError(
-                f"Unauthorized: only {', '.join(self._allowed_domains)} accounts may call this server"
-            )
+        email_lower = email.lower()
+        domain = email_lower.rsplit("@", 1)[-1]
+        if domain in self._allowed_domains:
+            return await call_next(context)
+        if email_lower in self._allowed_emails:
+            return await call_next(context)
+        if self._dynamic_email_allowed is not None and await self._dynamic_email_allowed(
+            email_lower
+        ):
+            return await call_next(context)
 
-        return await call_next(context)
+        raise ToolError(
+            f"Unauthorized: only {', '.join(self._allowed_domains)} accounts may call this server"
+        )
 
 
 def _build_static_verifier(api_key: str) -> StaticTokenVerifier:

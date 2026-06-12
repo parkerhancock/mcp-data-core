@@ -321,6 +321,91 @@ class TestDomainGate:
         result = await gate.on_call_tool(context, call_next)
         assert result == "tool-result"
 
+    async def test_accepts_static_allowed_email(
+        self, call_next: AsyncMock, context: MagicMock, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # An exact email exception is admitted even though its domain isn't
+        # allowed; match is case-insensitive.
+        monkeypatch.setattr(
+            auth_module,
+            "get_access_token",
+            lambda: MagicMock(claims={"email": "Kmax.AiBox@gmail.com", "email_verified": True}),
+        )
+        gate = make_domain_gate_middleware(["example.com"], allowed_emails=["kmax.aibox@gmail.com"])
+        result = await gate.on_call_tool(context, call_next)
+        assert result == "tool-result"
+
+    async def test_static_allowed_email_still_requires_verified(
+        self, call_next: AsyncMock, context: MagicMock, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Being on the exception list does not bypass email verification.
+        monkeypatch.setattr(
+            auth_module,
+            "get_access_token",
+            lambda: MagicMock(claims={"email": "kmax.aibox@gmail.com", "email_verified": False}),
+        )
+        gate = make_domain_gate_middleware(["example.com"], allowed_emails=["kmax.aibox@gmail.com"])
+        with pytest.raises(ToolError, match="not verified"):
+            await gate.on_call_tool(context, call_next)
+        call_next.assert_not_awaited()
+
+    async def test_dynamic_checker_allows_email(
+        self, call_next: AsyncMock, context: MagicMock, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # The runtime predicate admits an off-domain address and receives
+        # the lowercased email.
+        seen: list[str] = []
+
+        async def checker(email: str) -> bool:
+            seen.append(email)
+            return email == "kmax.aibox@gmail.com"
+
+        monkeypatch.setattr(
+            auth_module,
+            "get_access_token",
+            lambda: MagicMock(claims={"email": "Kmax.AiBox@gmail.com", "email_verified": True}),
+        )
+        gate = make_domain_gate_middleware(["example.com"], dynamic_email_allowed=checker)
+        result = await gate.on_call_tool(context, call_next)
+        assert result == "tool-result"
+        assert seen == ["kmax.aibox@gmail.com"]
+
+    async def test_dynamic_checker_rejects_unknown_email(
+        self, call_next: AsyncMock, context: MagicMock, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        async def checker(email: str) -> bool:
+            return False
+
+        monkeypatch.setattr(
+            auth_module,
+            "get_access_token",
+            lambda: MagicMock(claims={"email": "stranger@gmail.com", "email_verified": True}),
+        )
+        gate = make_domain_gate_middleware(["example.com"], dynamic_email_allowed=checker)
+        with pytest.raises(ToolError, match="example.com"):
+            await gate.on_call_tool(context, call_next)
+
+    async def test_domain_match_skips_dynamic_checker(
+        self, call_next: AsyncMock, context: MagicMock, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # In-domain callers must never trigger the Firestore round-trip.
+        called = False
+
+        async def checker(email: str) -> bool:
+            nonlocal called
+            called = True
+            return False
+
+        monkeypatch.setattr(
+            auth_module,
+            "get_access_token",
+            lambda: MagicMock(claims={"email": "someone@example.com", "email_verified": True}),
+        )
+        gate = make_domain_gate_middleware(["example.com"], dynamic_email_allowed=checker)
+        result = await gate.on_call_tool(context, call_next)
+        assert result == "tool-result"
+        assert called is False
+
 
 class TestBuildServerAuthParam:
     def test_default_none_keeps_legacy_oauth_route(self) -> None:
