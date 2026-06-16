@@ -191,7 +191,14 @@ class CorpusDBBase:
                 f"{cls.LABEL} corpus not found at {resolved}. {cls._install_hint()}"
             )
         try:
-            conn = sqlite3.connect(f"file:{resolved}?mode=ro", uri=True)
+            # immutable=1 (not just mode=ro): treat the file as read-only,
+            # unchanging media. This skips SQLite's POSIX fcntl locking and the
+            # change-counter check — both of which fail when the corpus lives on
+            # a network filesystem that doesn't implement advisory locking (e.g.
+            # a gcsfuse / Cloud Storage FUSE mount), where plain mode=ro raises
+            # "unable to open database file". Bundled corpora are read-only for
+            # a process's lifetime, so immutable is always safe here.
+            conn = sqlite3.connect(f"file:{resolved}?mode=ro&immutable=1", uri=True)
         except sqlite3.OperationalError as exc:
             raise CorpusUnavailable(
                 f"Could not open {cls.LABEL} corpus at {resolved}: {exc}. {cls._install_hint()}"
