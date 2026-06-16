@@ -49,17 +49,69 @@ Statute-shaped subclassing (override ``get_section``/``search``)::
 
 from __future__ import annotations
 
+import logging
 import os
 import sqlite3
 from dataclasses import dataclass
 from pathlib import Path
-from typing import ClassVar, Self
+from typing import ClassVar, Protocol, Self, runtime_checkable
 
 import zstandard as zstd
+
+logger = logging.getLogger(__name__)
 
 
 class CorpusUnavailable(RuntimeError):
     """Raised when a bundled corpus database cannot be located or opened."""
+
+
+# ----------------------------------------------------------------------
+# Pluggable provisioning seam (interface only — no implementation here)
+# ----------------------------------------------------------------------
+
+
+@runtime_checkable
+class CorpusProvider(Protocol):
+    """Hook for materializing a corpus that is absent locally.
+
+    mcp-data-core defines this interface but ships **no implementation**: it
+    never fetches, downloads, or knows where corpora come from. That policy
+    (object storage, a manifest, HTTP, …) belongs to the consumer. A consumer
+    registers a provider once via :func:`set_corpus_provider`; when
+    :meth:`CorpusDBBase.open` finds a corpus missing, it calls :meth:`ensure`
+    to give the provider a chance to supply it before raising.
+
+    Implementations MUST be safe to call concurrently for the same ``name``
+    (idempotent — e.g. guard the fetch with a per-corpus lock + atomic rename)
+    and SHOULD be cheap on the hit path (return immediately when a valid local
+    copy already exists).
+    """
+
+    def ensure(self, *, name: str, label: str, target: Path) -> Path | None:
+        """Materialize the corpus identified by ``name`` and return a path.
+
+        ``name`` is the corpus's :attr:`CorpusDBBase.DEFAULT_FILENAME` (e.g.
+        ``"mpep.db"``) — a stable key. Return the path to a readable, **local**
+        SQLite file (``target`` or any other local path). Return ``None`` if
+        this provider does not supply ``name``; :meth:`CorpusDBBase.open` then
+        falls through to its normal missing-corpus error. Raising is tolerated
+        but discouraged — ``open`` treats an exception as ``None``.
+        """
+        ...
+
+
+_corpus_provider: CorpusProvider | None = None
+
+
+def set_corpus_provider(provider: CorpusProvider | None) -> None:
+    """Register (or clear, with ``None``) the process-wide corpus provider."""
+    global _corpus_provider
+    _corpus_provider = provider
+
+
+def get_corpus_provider() -> CorpusProvider | None:
+    """Return the registered corpus provider, or ``None`` if none is set."""
+    return _corpus_provider
 
 
 def _cache_root() -> Path:
@@ -181,11 +233,32 @@ class CorpusDBBase:
         """Open the corpus read-only.
 
         Resolution order: explicit ``path`` → ``cls.ENV_VAR`` → default
-        cache location. Raises :class:`CorpusUnavailable` with the
-        connector's install hint if the file is missing (when
+        cache location. If the resolved file is missing and a
+        :class:`CorpusProvider` is registered (see :func:`set_corpus_provider`),
+        the provider is asked to materialize it before falling back to the
+        :class:`CorpusUnavailable` error. Raises :class:`CorpusUnavailable`
+        with the connector's install hint if the file is still missing (when
         ``must_exist=True``) or unopenable.
         """
         resolved = cls._resolve_path(path)
+        if not resolved.exists():
+            provider = get_corpus_provider()
+            if provider is not None:
+                try:
+                    supplied = provider.ensure(
+                        name=cls.DEFAULT_FILENAME, label=cls.LABEL, target=resolved
+                    )
+                except Exception:  # a provider fault must not change open()'s contract
+                    logger.warning(
+                        "Corpus provider failed to supply %s (%s); "
+                        "falling back to the local-path lookup.",
+                        cls.DEFAULT_FILENAME,
+                        cls.LABEL,
+                        exc_info=True,
+                    )
+                    supplied = None
+                if supplied is not None:
+                    resolved = Path(supplied)
         if must_exist and not resolved.exists():
             raise CorpusUnavailable(
                 f"{cls.LABEL} corpus not found at {resolved}. {cls._install_hint()}"

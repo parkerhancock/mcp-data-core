@@ -16,10 +16,13 @@ import pytest
 
 from mcp_data_core.corpus_db import (
     CorpusDBBase,
+    CorpusProvider,
     CorpusUnavailable,
     OutlineCorpusDB,
     OutlineCorpusHit,
     OutlineCorpusSection,
+    get_corpus_provider,
+    set_corpus_provider,
 )
 
 # ----------------------------------------------------------------------
@@ -270,3 +273,87 @@ def test_statute_shape_subclass_inherits_lifecycle(corpus_path: Path) -> None:
     # No get_section/search on the bare subclass — that's intentional.
     assert not hasattr(_StatuteCorpus, "get_section")
     assert not hasattr(_StatuteCorpus, "search")
+
+
+# ----------------------------------------------------------------------
+# Provisioning seam (CorpusProvider)
+# ----------------------------------------------------------------------
+
+
+@pytest.fixture
+def _no_provider():
+    """Ensure each test starts and ends with no provider registered."""
+    set_corpus_provider(None)
+    yield
+    set_corpus_provider(None)
+
+
+class _RecordingProvider:
+    """A CorpusProvider that supplies a known file and records its calls."""
+
+    def __init__(self, supply: Path | None) -> None:
+        self.supply = supply
+        self.calls: list[dict[str, object]] = []
+
+    def ensure(self, *, name: str, label: str, target: Path) -> Path | None:
+        self.calls.append({"name": name, "label": label, "target": target})
+        return self.supply
+
+
+def test_set_get_provider_round_trip(_no_provider: None) -> None:
+    assert get_corpus_provider() is None
+    provider = _RecordingProvider(supply=None)
+    set_corpus_provider(provider)
+    assert get_corpus_provider() is provider
+    # The duck-typed provider satisfies the runtime-checkable Protocol.
+    assert isinstance(provider, CorpusProvider)
+    set_corpus_provider(None)
+    assert get_corpus_provider() is None
+
+
+def test_provider_supplies_missing_corpus(_no_provider: None, tmp_path: Path) -> None:
+    """When the corpus is absent, a registered provider materializes it."""
+    built = tmp_path / "supplied.db"
+    _build_outline_corpus(built)
+    provider = _RecordingProvider(supply=built)
+    set_corpus_provider(provider)
+
+    missing = tmp_path / "mcp_data_core_test.db"  # does not exist
+    with _TestCorpus.open(missing) as corpus:
+        assert corpus.path == built
+        assert corpus.meta()["corpus_version"] == "test-1.0"
+
+    # Provider was asked with the corpus's stable key (DEFAULT_FILENAME) + label.
+    assert provider.calls == [
+        {"name": _TestCorpus.DEFAULT_FILENAME, "label": _TestCorpus.LABEL, "target": missing}
+    ]
+
+
+def test_provider_not_consulted_when_corpus_present(_no_provider: None, corpus_path: Path) -> None:
+    """The hit path is cheap: an existing corpus never calls the provider."""
+    provider = _RecordingProvider(supply=None)
+    set_corpus_provider(provider)
+    with _TestCorpus.open(corpus_path) as corpus:
+        assert corpus.path == corpus_path
+    assert provider.calls == []
+
+
+def test_provider_declining_falls_through_to_error(_no_provider: None, tmp_path: Path) -> None:
+    """A provider returning None leaves the normal missing-corpus error intact."""
+    set_corpus_provider(_RecordingProvider(supply=None))
+    missing = tmp_path / "mcp_data_core_test.db"
+    with pytest.raises(CorpusUnavailable):
+        _TestCorpus.open(missing)
+
+
+def test_provider_exception_is_swallowed(_no_provider: None, tmp_path: Path) -> None:
+    """A faulty provider must not change open()'s contract — it degrades to the error."""
+
+    class _Boom:
+        def ensure(self, *, name: str, label: str, target: Path) -> Path | None:
+            raise RuntimeError("provider exploded")
+
+    set_corpus_provider(_Boom())
+    missing = tmp_path / "mcp_data_core_test.db"
+    with pytest.raises(CorpusUnavailable):
+        _TestCorpus.open(missing)
