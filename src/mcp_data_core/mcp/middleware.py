@@ -60,7 +60,10 @@ def _friendly_message(tool_name: str, exc: BaseException) -> str | None:
     if isinstance(exc, NotFoundError):
         return f"{NOT_RETRYABLE} Not found: {exc}"
     if isinstance(exc, AuthenticationError):
-        return f"{NOT_RETRYABLE} Authentication failed for upstream service."
+        # Keep the exception text: it carries actionable detail (which
+        # upstream, what it said) that operators need to triage credential
+        # incidents, and some sources raise deliberate client-facing hints.
+        return f"{NOT_RETRYABLE} Upstream authentication failed: {exc}"
     if isinstance(exc, ConfigurationError):
         return f"{NOT_RETRYABLE} Server misconfiguration: {exc}"
     if isinstance(exc, McpDataCoreError):
@@ -75,7 +78,31 @@ class FriendlyErrors(Middleware):
         tool_name = getattr(context.message, "name", "unknown_tool")
         try:
             return await call_next(context)
-        except ToolError:
+        except ToolError as exc:
+            # FastMCP wraps exceptions raised inside tool bodies in
+            # ToolError("Error calling tool 'X': <str(exc)>") *below* this
+            # middleware (fastmcp.server.server.FastMCP.call_tool runs
+            # middleware around an inner call_tool(run_middleware=False)
+            # that does the wrapping), chaining the original via
+            # ``raise ... from exc``. Walk the explicit __cause__ chain so
+            # typed exceptions still get the friendly mapping. ToolErrors
+            # raised deliberately by tools carry no __cause__ and pass
+            # through untouched.
+            cause = exc.__cause__
+            depth = 0
+            while cause is not None and depth < 10:
+                message = _friendly_message(tool_name, cause)
+                if message is not None:
+                    _friendly_logger.warning(
+                        "Remapping %s from %s: %s",
+                        tool_name,
+                        type(cause).__name__,
+                        cause,
+                        exc_info=cause,
+                    )
+                    raise ToolError(message) from cause
+                cause = cause.__cause__
+                depth += 1
             raise
         except Exception as exc:
             message = _friendly_message(tool_name, exc)

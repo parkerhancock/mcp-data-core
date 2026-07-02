@@ -7,8 +7,11 @@ import json
 import logging
 import sys
 from logging.handlers import RotatingFileHandler
+from types import SimpleNamespace
+from typing import Any
 
 import pytest
+from fastmcp.exceptions import ToolError
 
 
 @pytest.fixture
@@ -94,6 +97,132 @@ def test_log_to_stdout_falsy_values_dont_attach(monkeypatch, falsy, fresh_middle
     monkeypatch.setenv("LAW_TOOLS_CORE_LOG_TO_STDOUT", falsy)
     fresh_middleware._configure_tool_logger()
     assert fresh_middleware._tool_logger.handlers == []
+
+
+# ---------------------------------------------------------------------------
+# FriendlyErrors
+# ---------------------------------------------------------------------------
+
+
+def _fake_context(name: str = "some_tool") -> Any:
+    """Minimal stand-in for MiddlewareContext with a tool-call message."""
+    return SimpleNamespace(message=SimpleNamespace(name=name))
+
+
+def _raiser(exc: BaseException):
+    async def call_next(context):  # noqa: ANN001, ANN202
+        raise exc
+
+    return call_next
+
+
+async def test_friendly_errors_maps_typed_exception() -> None:
+    """A typed exception raised below the middleware gets the friendly mapping."""
+    from mcp_data_core.exceptions import RateLimitError
+    from mcp_data_core.mcp.middleware import FriendlyErrors
+
+    exc = RateLimitError("slow down", status_code=429)
+    with pytest.raises(ToolError, match=r"\[retryable\] Rate limited by upstream"):
+        await FriendlyErrors().on_call_tool(_fake_context(), _raiser(exc))
+
+
+async def test_friendly_errors_maps_toolerror_wrapping_typed_cause() -> None:
+    """FastMCP wraps tool-body exceptions in ToolError below the middleware.
+
+    fastmcp.server.server.FastMCP.call_tool runs middleware around an inner
+    ``call_tool(run_middleware=False)`` that converts a tool-raised exception
+    to ``ToolError("Error calling tool 'X': <str(exc)>") from exc``. The
+    middleware must recover the typed cause and remap it.
+    """
+    from mcp_data_core.exceptions import AuthenticationError
+    from mcp_data_core.mcp.middleware import FriendlyErrors
+
+    cause = AuthenticationError("PACER authentication failed", status_code=401)
+    try:
+        raise ToolError(f"Error calling tool 'some_tool': {cause}") from cause
+    except ToolError as wrapped_exc:
+        wrapped = wrapped_exc
+
+    with pytest.raises(
+        ToolError,
+        match=r"\[not-retryable\] Upstream authentication failed: "
+        r"PACER authentication failed",
+    ) as excinfo:
+        await FriendlyErrors().on_call_tool(_fake_context(), _raiser(wrapped))
+    assert excinfo.value.__cause__ is cause
+
+
+async def test_friendly_errors_walks_nested_cause_chain() -> None:
+    """A typed exception buried more than one link deep is still found."""
+    from mcp_data_core.exceptions import ServerError
+    from mcp_data_core.mcp.middleware import FriendlyErrors
+
+    root = ServerError("upstream 500", status_code=500)
+    try:
+        raise RuntimeError("intermediate") from root
+    except RuntimeError as mid_exc:
+        try:
+            raise ToolError("Error calling tool 'some_tool': intermediate") from mid_exc
+        except ToolError as wrapped_exc:
+            wrapped = wrapped_exc
+
+    with pytest.raises(ToolError, match=r"\[retryable\] Upstream server error"):
+        await FriendlyErrors().on_call_tool(_fake_context(), _raiser(wrapped))
+
+
+async def test_friendly_errors_passes_through_deliberate_toolerror() -> None:
+    """A ToolError raised directly by a tool (no __cause__) is untouched."""
+    from mcp_data_core.mcp.middleware import FriendlyErrors
+
+    deliberate = ToolError("deliberate client-facing message")
+    with pytest.raises(ToolError, match="^deliberate client-facing message$"):
+        await FriendlyErrors().on_call_tool(_fake_context(), _raiser(deliberate))
+
+
+async def test_friendly_errors_passes_through_toolerror_with_unmapped_cause() -> None:
+    """A ToolError chained from an exception with no mapping is untouched."""
+    from mcp_data_core.mcp.middleware import FriendlyErrors
+
+    try:
+        raise ToolError("Error calling tool 'some_tool': boom") from KeyError("boom")
+    except ToolError as wrapped_exc:
+        wrapped = wrapped_exc
+
+    with pytest.raises(ToolError, match="boom") as excinfo:
+        await FriendlyErrors().on_call_tool(_fake_context(), _raiser(wrapped))
+    assert excinfo.value is wrapped
+
+
+async def test_friendly_errors_end_to_end_over_fastmcp() -> None:
+    """Full stack: tool raises AuthenticationError, client sees the friendly message."""
+    from fastmcp import Client, FastMCP
+
+    from mcp_data_core.exceptions import AuthenticationError
+    from mcp_data_core.mcp.middleware import FriendlyErrors
+
+    server = FastMCP("test")
+    server.add_middleware(FriendlyErrors())
+
+    @server.tool
+    async def pacer_tool() -> dict:
+        raise AuthenticationError(
+            "PACER authentication failed: Invalid username or password",
+            status_code=401,
+        )
+
+    @server.tool
+    async def deliberate_tool() -> dict:
+        raise ToolError("deliberate client-facing message")
+
+    async with Client(server) as client:
+        with pytest.raises(
+            ToolError,
+            match=r"^\[not-retryable\] Upstream authentication failed: "
+            r"PACER authentication failed: Invalid username or password",
+        ):
+            await client.call_tool("pacer_tool", {})
+        with pytest.raises(ToolError, match="^deliberate client-facing message$"):
+            await client.call_tool("deliberate_tool", {})
 
 
 def test_bearer_token_auth_is_deprecated() -> None:

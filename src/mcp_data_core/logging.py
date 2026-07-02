@@ -77,7 +77,16 @@ def log_file_hint() -> str:
     If multiple apps have configured logging in the same process (e.g. both
     multiple consumers are loaded), all configured paths are listed. If
     nothing has been configured, returns an empty string.
+
+    The hint points at a server-local file, which is only useful when the
+    caller can read it (local stdio mode). Remote deployments (e.g. Cloud
+    Run HTTP servers) should set ``LAW_TOOLS_CORE_SUPPRESS_LOG_HINT=true``
+    so container-internal paths never leak into client-facing error
+    messages. Checked at call time, so the flag can be set after import.
     """
+    suppress = os.environ.get("LAW_TOOLS_CORE_SUPPRESS_LOG_HINT", "")
+    if suppress.strip().lower() in ("1", "true", "yes", "on"):
+        return ""
     if not _configured_log_files:
         return ""
     paths = list(_configured_log_files.values())
