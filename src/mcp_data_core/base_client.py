@@ -220,7 +220,14 @@ class BaseAsyncClient:
 
         status = response.status_code
         body = response.text[:500] if response.text else ""
-        msg = f"{context}: HTTP {status}" if context else f"HTTP {status}"
+        # ApiError.__str__ already appends "HTTP <status>", so put what the
+        # status alone doesn't say — which request failed and what the
+        # upstream returned — in the message. (A bare "HTTP 400" message
+        # rendered as the duplicated "HTTP 400 (HTTP 400)".)
+        if not context:
+            context = f"{response.request.method} {response.request.url.path}"
+        detail = " ".join(body.split())[:200]
+        msg = f"{context}: {detail}" if detail else context
 
         # Log full response details to file for debugging
         logger.error(
