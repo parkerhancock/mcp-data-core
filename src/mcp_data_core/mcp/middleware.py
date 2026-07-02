@@ -177,6 +177,11 @@ _tool_logger = logging.getLogger("mcp_data_core.mcp.tools")
 _tool_logger.setLevel(logging.INFO)
 _tool_logger.propagate = False
 
+# Idempotence flag. Guarding on ``_tool_logger.handlers`` is not safe:
+# other code (e.g. pytest's logging plugin) may attach its own handlers
+# to this logger, which would make configuration silently no-op.
+_tool_logger_configured = False
+
 
 def _configure_tool_logger() -> None:
     """Attach handlers based on env config. Safe to call multiple times.
@@ -193,8 +198,10 @@ def _configure_tool_logger() -> None:
     Either, both, or neither. If neither is set, structured tool-call
     logging is silently disabled (callers get tool results normally).
     """
-    if _tool_logger.handlers:
+    global _tool_logger_configured
+    if _tool_logger_configured:
         return
+    _tool_logger_configured = True
     formatter = logging.Formatter("%(message)s")
     log_dir = _env.get("LOG_DIR")
     if log_dir:
@@ -255,11 +262,44 @@ class ToolCallLogger(Middleware):
 # servers wrap.
 _TITLE_ACRONYMS = frozenset(
     {
-        "fda", "cms", "cdc", "nih", "ncbi", "nci", "nppes", "umls", "uspstf",
-        "ndc", "pma", "udi", "spl", "loinc", "icd", "icd10cm", "rxnorm",
-        "rxcui", "cpc", "evs", "vehss", "mhs", "pfs", "gudid", "pmc", "hpo",
-        "ucum", "epo", "ptab", "uspto", "sec", "nsde", "ucr", "api", "url",
-        "id", "ndcs", "gdc",
+        "fda",
+        "cms",
+        "cdc",
+        "nih",
+        "ncbi",
+        "nci",
+        "nppes",
+        "umls",
+        "uspstf",
+        "ndc",
+        "pma",
+        "udi",
+        "spl",
+        "loinc",
+        "icd",
+        "icd10cm",
+        "rxnorm",
+        "rxcui",
+        "cpc",
+        "evs",
+        "vehss",
+        "mhs",
+        "pfs",
+        "gudid",
+        "pmc",
+        "hpo",
+        "ucum",
+        "epo",
+        "ptab",
+        "uspto",
+        "sec",
+        "nsde",
+        "ucr",
+        "api",
+        "url",
+        "id",
+        "ndcs",
+        "gdc",
     }
 )
 
@@ -291,7 +331,5 @@ class DefaultToolTitles(Middleware):
             if getattr(tool, "title", None):
                 result.append(tool)
             else:
-                result.append(
-                    tool.model_copy(update={"title": _humanize_tool_name(tool.name)})
-                )
+                result.append(tool.model_copy(update={"title": _humanize_tool_name(tool.name)}))
         return result

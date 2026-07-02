@@ -39,17 +39,31 @@ def fresh_middleware(monkeypatch, tmp_path):
     middleware._tool_logger.handlers.clear()
 
 
+def _attached_handlers(middleware_mod) -> list[logging.Handler]:
+    """Handlers attached by _configure_tool_logger.
+
+    pytest's logging plugin attaches its own LogCaptureHandlers to every
+    logger during the test-call phase; filter those out so assertions see
+    only what the module under test attached.
+    """
+    return [
+        h
+        for h in middleware_mod._tool_logger.handlers
+        if not type(h).__module__.startswith("_pytest")
+    ]
+
+
 def test_no_handlers_when_no_env(fresh_middleware) -> None:
     """With neither env var set, no handler is attached and logging is a no-op."""
     fresh_middleware._configure_tool_logger()
-    assert fresh_middleware._tool_logger.handlers == []
+    assert _attached_handlers(fresh_middleware) == []
 
 
 def test_file_handler_when_log_dir_set(monkeypatch, tmp_path, fresh_middleware) -> None:
     """LAW_TOOLS_CORE_LOG_DIR attaches a rotating file handler."""
     monkeypatch.setenv("LAW_TOOLS_CORE_LOG_DIR", str(tmp_path))
     fresh_middleware._configure_tool_logger()
-    handlers = fresh_middleware._tool_logger.handlers
+    handlers = _attached_handlers(fresh_middleware)
     assert len(handlers) == 1
     assert isinstance(handlers[0], RotatingFileHandler)
     assert str(handlers[0].baseFilename).endswith("tool_calls.jsonl")
@@ -59,7 +73,7 @@ def test_stdout_handler_when_log_to_stdout_set(monkeypatch, fresh_middleware) ->
     """LAW_TOOLS_CORE_LOG_TO_STDOUT=true attaches a StreamHandler to sys.stdout."""
     monkeypatch.setenv("LAW_TOOLS_CORE_LOG_TO_STDOUT", "true")
     fresh_middleware._configure_tool_logger()
-    handlers = fresh_middleware._tool_logger.handlers
+    handlers = _attached_handlers(fresh_middleware)
     assert len(handlers) == 1
     assert isinstance(handlers[0], logging.StreamHandler)
     assert handlers[0].stream is sys.stdout
@@ -70,8 +84,7 @@ def test_both_handlers_when_both_set(monkeypatch, tmp_path, fresh_middleware) ->
     monkeypatch.setenv("LAW_TOOLS_CORE_LOG_DIR", str(tmp_path))
     monkeypatch.setenv("LAW_TOOLS_CORE_LOG_TO_STDOUT", "1")
     fresh_middleware._configure_tool_logger()
-    handlers = fresh_middleware._tool_logger.handlers
-    assert len(handlers) == 2
+    assert len(_attached_handlers(fresh_middleware)) == 2
 
 
 def test_stdout_handler_emits_json(monkeypatch, capsys, fresh_middleware) -> None:
@@ -88,7 +101,7 @@ def test_idempotent_configure(monkeypatch, fresh_middleware) -> None:
     monkeypatch.setenv("LAW_TOOLS_CORE_LOG_TO_STDOUT", "true")
     fresh_middleware._configure_tool_logger()
     fresh_middleware._configure_tool_logger()
-    assert len(fresh_middleware._tool_logger.handlers) == 1
+    assert len(_attached_handlers(fresh_middleware)) == 1
 
 
 @pytest.mark.parametrize("falsy", ["false", "FALSE", "0", "no", "off", ""])
@@ -96,7 +109,7 @@ def test_log_to_stdout_falsy_values_dont_attach(monkeypatch, falsy, fresh_middle
     """Falsy values for LOG_TO_STDOUT do not attach a stdout handler."""
     monkeypatch.setenv("LAW_TOOLS_CORE_LOG_TO_STDOUT", falsy)
     fresh_middleware._configure_tool_logger()
-    assert fresh_middleware._tool_logger.handlers == []
+    assert _attached_handlers(fresh_middleware) == []
 
 
 # ---------------------------------------------------------------------------
