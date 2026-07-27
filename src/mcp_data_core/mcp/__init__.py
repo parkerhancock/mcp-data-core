@@ -8,6 +8,7 @@ Env vars (all optional; deployment-specific):
     LAW_TOOLS_CORE_API_KEY      bearer token + HMAC signing secret
     LAW_TOOLS_CORE_PUBLIC_URL   base URL for signed download links
     LAW_TOOLS_CORE_LOG_DIR      directory for tool-call JSONL logs
+    LAW_TOOLS_CORE_ACTOR_HASH_KEY HMAC key for pseudonymous active-user counts
     LAW_TOOLS_CORE_DOWNLOAD_CACHE      on-disk cache dir for downloads
     LAW_TOOLS_CORE_DOWNLOAD_TTL_SECONDS HMAC rotation bucket (default 86400)
     LAW_TOOLS_CORE_RESOURCES_ENABLED   emit MCP resource_link blocks in
@@ -56,7 +57,7 @@ from .downloads import (
 # BearerTokenAuth``) so existing consumers don't break, just un-advertised so
 # new code doesn't couple to it.
 from .middleware import BearerTokenAuth as BearerTokenAuth
-from .middleware import FriendlyErrors, ToolCallLogger
+from .middleware import FriendlyErrors, ToolCallLogger, pseudonymous_actor_id
 from .server_factory import build_server
 
 __all__ = [
@@ -82,6 +83,7 @@ __all__ = [
     "handle_download",
     "make_auth",
     "make_domain_gate_middleware",
+    "pseudonymous_actor_id",
     "read_resource",
     "reap_stale_bulk_zips",
     "register_source",

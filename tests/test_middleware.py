@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import hashlib
+import hmac
 import importlib
 import json
 import logging
@@ -28,6 +30,8 @@ def fresh_middleware(monkeypatch, tmp_path):
         "LAW_TOOLS_LOG_DIR",
         "LAW_TOOLS_CORE_LOG_TO_STDOUT",
         "LAW_TOOLS_LOG_TO_STDOUT",
+        "LAW_TOOLS_CORE_ACTOR_HASH_KEY",
+        "LAW_TOOLS_ACTOR_HASH_KEY",
     ):
         monkeypatch.delenv(var, raising=False)
 
@@ -102,6 +106,68 @@ def test_idempotent_configure(monkeypatch, fresh_middleware) -> None:
     fresh_middleware._configure_tool_logger()
     fresh_middleware._configure_tool_logger()
     assert len(_attached_handlers(fresh_middleware)) == 1
+
+
+def test_pseudonymous_actor_id_is_normalized_and_service_scoped(fresh_middleware) -> None:
+    """The same normalized email is stable only within a service's key."""
+    expected = hmac.new(
+        b"service-a",
+        b"person@example.com",
+        hashlib.sha256,
+    ).hexdigest()[:32]
+
+    assert (
+        fresh_middleware.pseudonymous_actor_id(
+            " Person@Example.COM ",
+            "service-a",
+        )
+        == expected
+    )
+    assert (
+        fresh_middleware.pseudonymous_actor_id(
+            "person@example.com",
+            "service-b",
+        )
+        != expected
+    )
+
+
+@pytest.mark.parametrize("email", [None, "", "unauthenticated"])
+def test_pseudonymous_actor_id_omits_non_users(email, fresh_middleware) -> None:
+    assert fresh_middleware.pseudonymous_actor_id(email, "service-a") is None
+
+
+async def test_tool_call_logger_adds_only_pseudonymous_actor(
+    monkeypatch,
+    capsys,
+    fresh_middleware,
+) -> None:
+    """Authenticated calls include an actor ID without exposing the email."""
+    email = "person@example.com"
+    monkeypatch.setenv("LAW_TOOLS_CORE_LOG_TO_STDOUT", "true")
+    monkeypatch.setenv("LAW_TOOLS_CORE_ACTOR_HASH_KEY", "service-a")
+    monkeypatch.setattr(
+        fresh_middleware,
+        "get_access_token",
+        lambda: SimpleNamespace(claims={"email": email}),
+    )
+    context = SimpleNamespace(
+        message=SimpleNamespace(name="test_tool"),
+        timestamp=SimpleNamespace(isoformat=lambda: "2026-07-27T12:00:00+00:00"),
+    )
+
+    async def call_next(_context):
+        return {"ok": True}
+
+    assert await fresh_middleware.ToolCallLogger().on_call_tool(context, call_next) == {
+        "ok": True
+    }
+    record = json.loads(capsys.readouterr().out.strip())
+    assert record["actor_id"] == fresh_middleware.pseudonymous_actor_id(
+        email,
+        "service-a",
+    )
+    assert email not in json.dumps(record)
 
 
 @pytest.mark.parametrize("falsy", ["false", "FALSE", "0", "no", "off", ""])

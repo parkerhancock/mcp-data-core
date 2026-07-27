@@ -7,6 +7,8 @@ Install order matters. ``FriendlyErrors`` must sit outer of
 
 from __future__ import annotations
 
+import hashlib
+import hmac
 import json
 import logging
 import sys
@@ -18,6 +20,7 @@ from pathlib import Path
 
 import httpx
 from fastmcp.exceptions import ToolError
+from fastmcp.server.dependencies import get_access_token
 from fastmcp.server.middleware import Middleware, MiddlewareContext
 
 from mcp_data_core.exceptions import (
@@ -183,6 +186,31 @@ _tool_logger.propagate = False
 _tool_logger_configured = False
 
 
+def pseudonymous_actor_id(email: str | None, secret: str | None = None) -> str | None:
+    """Return a service-scoped actor ID without retaining the email address."""
+    normalized_email = (email or "").strip().lower()
+    hash_key = secret if secret is not None else _env.get("ACTOR_HASH_KEY")
+    if not normalized_email or normalized_email == "unauthenticated" or not hash_key:
+        return None
+    return hmac.new(
+        hash_key.encode(),
+        normalized_email.encode(),
+        hashlib.sha256,
+    ).hexdigest()[:32]
+
+
+def _current_actor_id() -> str | None:
+    """Read the authenticated email claim and immediately pseudonymize it."""
+    if not _env.get("ACTOR_HASH_KEY"):
+        return None
+    try:
+        token = get_access_token()
+    except Exception:
+        return None
+    claims = getattr(token, "claims", None) or {}
+    return pseudonymous_actor_id(claims.get("email"))
+
+
 def _configure_tool_logger() -> None:
     """Attach handlers based on env config. Safe to call multiple times.
 
@@ -247,6 +275,9 @@ class ToolCallLogger(Middleware):
                 "duration_ms": duration_ms,
                 "ok": error_msg is None,
             }
+            actor_id = _current_actor_id()
+            if actor_id:
+                record["actor_id"] = actor_id
             if error_msg:
                 record["error"] = error_msg
                 record["traceback"] = error_tb
