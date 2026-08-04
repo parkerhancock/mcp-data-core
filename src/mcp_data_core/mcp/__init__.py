@@ -13,9 +13,11 @@ Env vars (all optional; deployment-specific):
     LAW_TOOLS_CORE_DOWNLOAD_TTL_SECONDS HMAC rotation bucket (default 86400)
     LAW_TOOLS_CORE_RESOURCES_ENABLED   emit MCP resource_link blocks in
                                        download results (default ON; set to
-                                       0/false/no/off for text-only — the
-                                       signed HTTP URL is always present
-                                       either way)
+                                       0/false/no/off to omit resources; the
+                                       signed HTTP URL is always present)
+    LAW_TOOLS_CORE_STRUCTURED_DOWNLOADS_ENABLED
+                                       emit structured download payloads;
+                                       defaults to RESOURCES_ENABLED when unset
 
 All variables accept a legacy ``LAW_TOOLS_*`` alias for backward
 compatibility with pre-split law-tools deployments.

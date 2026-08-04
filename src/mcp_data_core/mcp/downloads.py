@@ -104,10 +104,24 @@ def _resources_enabled() -> bool:
     ``LAW_TOOLS_CORE_RESOURCES_ENABLED=0`` (``false``/``no``/``off``) on a
     deployment whose clients reject tool-returned links rather than ignoring
     them — e.g. the remote-MCP connector behind claude.ai, which replaces an
-    unsupported link with "Resource links are not currently supported" — to
-    fall back to a clean text-only result.
+    unsupported link with "Resource links are not currently supported".
+    ``STRUCTURED_DOWNLOADS_ENABLED`` independently controls the JSON payload.
     """
     return _env.get("RESOURCES_ENABLED", "").strip().lower() not in {"0", "false", "no", "off"}
+
+
+def _structured_downloads_enabled() -> bool:
+    """Whether download results include their JSON payload.
+
+    The setting is independent from MCP resources so code-mode clients can
+    receive a structured ``download_url`` without a ``resource_link``. When
+    unset, it follows ``RESOURCES_ENABLED`` to preserve the historical output
+    profile for existing deployments.
+    """
+    configured = _env.get("STRUCTURED_DOWNLOADS_ENABLED", "").strip().lower()
+    if not configured:
+        return _resources_enabled()
+    return configured not in {"0", "false", "no", "off"}
 
 
 def _explicit_download_base_url() -> str:
@@ -537,9 +551,10 @@ async def download_response(
         "filename": filename,
         "content_type": content_type,
         "size_bytes": len(content),
-        "resource_uri": build_resource_uri(resource_path),
         **extras,
     }
+    if _resources_enabled():
+        payload["resource_uri"] = build_resource_uri(resource_path)
 
     # Durable-store path (cloud deployments): upload the bytes and return
     # a direct signed URL. This server never delivers the bytes, so the
@@ -699,20 +714,19 @@ async def download_tool_result(
     backwards-compat rule).
 
     When ``LAW_TOOLS_CORE_RESOURCES_ENABLED`` is set (see
-    :func:`_resources_enabled`), the result additionally carries:
+    :func:`_resources_enabled`), the result additionally carries a
+    ``ResourceLink`` content block pointing at ``pca://{resource_path}``,
+    which resource-aware clients follow via ``resources/read``.
 
-    - a ``ResourceLink`` content block pointing at ``pca://{resource_path}``,
-      which resource-aware MCP clients follow via ``resources/read`` over the
-      existing MCP session — no separate HTTP fetch, no domain allowlist; and
-    - ``structured_content``: the same dict returned by
-      :func:`download_response` (``download_url``, ``resource_uri``,
-      ``expires_at``, ``filename``, ``content_type``, ``size_bytes``, plus any
-      ``extras``), for programmatic/code-mode clients.
+    When ``LAW_TOOLS_CORE_STRUCTURED_DOWNLOADS_ENABLED`` is set, the result
+    additionally carries ``structured_content``: the same dict returned by
+    :func:`download_response` (``download_url``, ``expires_at``, ``filename``,
+    ``content_type``, ``size_bytes``, plus any extras). ``resource_uri`` is
+    present only when resources are enabled.
 
-    With resources disabled (the default), the result is text-only — no
-    ``resource_link``, no ``structured_content`` — so surfaces that reject
-    non-HTTP links (or drop ``content`` text when ``structuredContent`` is
-    present) still see the URL.
+    Each setting defaults to the historical combined profile. Deployments can
+    now select structured HTTP downloads without sending document resources
+    through the MCP context path.
 
     Callers that need to mutate the payload before returning (e.g. add a
     ``source`` field) can pass it via ``**extras`` or skip this wrapper
@@ -727,17 +741,20 @@ async def download_tool_result(
         **extras,
     )
     text = _download_text_block(payload)
-    if not _resources_enabled():
-        return ToolResult(content=[text])
-    link = _make_resource_link(
-        uri=payload["resource_uri"],
-        name=filename,
-        mime_type=content_type,
-        size=len(content),
-        description=description,
-        last_modified=last_modified,
-    )
-    return ToolResult(content=[text, link], structured_content=payload)
+    blocks: list[TextContent | ResourceLink] = [text]
+    if _resources_enabled():
+        blocks.append(
+            _make_resource_link(
+                uri=payload["resource_uri"],
+                name=filename,
+                mime_type=content_type,
+                size=len(content),
+                description=description,
+                last_modified=last_modified,
+            )
+        )
+    structured = payload if _structured_downloads_enabled() else None
+    return ToolResult(content=blocks, structured_content=structured)
 
 
 async def read_resource(resource_path: str) -> list[ResourceContent]:
@@ -960,7 +977,7 @@ async def download_bulk_response(
                 filename=filename,
             )
             entry["download_url"], _ = _store_download_url(item.resource_path)
-            if _match_source(item.resource_path) is not None:
+            if _resources_enabled() and _match_source(item.resource_path) is not None:
                 entry["resource_uri"] = build_resource_uri(item.resource_path)
         # Only advertise a resource_uri / per-item download_url for items
         # whose resource_path maps to a registered source. Bulk callers
@@ -968,7 +985,8 @@ async def download_bulk_response(
         # that are used only as cache keys — exposing those as MCP URIs
         # would dangle because resources/read has no fetcher to call.
         elif _match_source(item.resource_path) is not None:
-            entry["resource_uri"] = build_resource_uri(item.resource_path)
+            if _resources_enabled():
+                entry["resource_uri"] = build_resource_uri(item.resource_path)
             if _download_base_url():
                 entry["download_url"] = build_download_url(item.resource_path)
         async with manifest_lock:
@@ -1075,18 +1093,14 @@ async def download_bulk_tool_result(
     and per-document URLs when minted) — the universally-supported floor.
 
     When ``LAW_TOOLS_CORE_RESOURCES_ENABLED`` is set (see
-    :func:`_resources_enabled`), the result additionally carries:
+    :func:`_resources_enabled`), the result additionally carries per-item
+    ``ResourceLink`` blocks for successfully fetched items.
 
-    - per-item ``ResourceLink`` blocks, one per successfully fetched item, so
-      resource-aware clients follow them via ``resources/read`` over MCP — the
-      per-doc transport path that bypasses the bulk-zip cap problem (large
-      archives can blow past JSON-RPC message limits); and
-    - ``structured_content`` carrying the same dict
-      :func:`download_bulk_response` returns: ``download_url`` (the zip),
-      ``manifest`` (with per-item ``resource_uri`` and ``download_url``
-      echoes), and the counts.
+    When ``LAW_TOOLS_CORE_STRUCTURED_DOWNLOADS_ENABLED`` is set, the result
+    additionally carries the structured zip URL, manifest, and counts.
 
-    With resources disabled (the default), the result is text-only.
+    The two settings are independent. This supports structured HTTP downloads
+    without transferring large documents through MCP resources.
 
     n=1 short-circuits to a single-doc ``ToolResult`` (same shape as
     :func:`download_tool_result`).
@@ -1100,42 +1114,42 @@ async def download_bulk_tool_result(
         max_concurrency=max_concurrency,
     )
     text = _download_text_block(payload)
-    if not _resources_enabled():
-        return ToolResult(content=[text])
     blocks: list[TextContent | ResourceLink] = [text]
-    manifest = payload.get("manifest")
-    if manifest is None:
-        # n=1 short-circuit — payload is a single-doc download_response
-        # dict. Build a single ResourceLink for it.
-        if payload.get("resource_uri"):
-            blocks.append(
-                _make_resource_link(
-                    uri=payload["resource_uri"],
-                    name=payload["filename"],
-                    mime_type=payload.get("content_type", "application/octet-stream"),
-                    size=payload.get("size_bytes"),
+    if _resources_enabled():
+        manifest = payload.get("manifest")
+        if manifest is None:
+            # n=1 short-circuit — payload is a single-doc download_response
+            # dict. Build a single ResourceLink for it.
+            if payload.get("resource_uri"):
+                blocks.append(
+                    _make_resource_link(
+                        uri=payload["resource_uri"],
+                        name=payload["filename"],
+                        mime_type=payload.get("content_type", "application/octet-stream"),
+                        size=payload.get("size_bytes"),
+                    )
                 )
-            )
-    else:
-        for entry in manifest:
-            if entry.get("status") != "ok":
-                continue
-            uri = entry.get("resource_uri")
-            if not uri:
-                continue
-            # The manifest filename is prefixed with the item_id directory
-            # (e.g. "ABC123/spec.pdf"); strip for the link display name.
-            display_name = entry["filename"].split("/", 1)[-1]
-            blocks.append(
-                _make_resource_link(
-                    uri=uri,
-                    name=display_name,
-                    mime_type=content_type_single,
-                    size=entry.get("size_bytes"),
-                    description=entry.get("description") or entry.get("document_title"),
+        else:
+            for entry in manifest:
+                if entry.get("status") != "ok":
+                    continue
+                uri = entry.get("resource_uri")
+                if not uri:
+                    continue
+                # The manifest filename is prefixed with the item_id directory
+                # (e.g. "ABC123/spec.pdf"); strip for the link display name.
+                display_name = entry["filename"].split("/", 1)[-1]
+                blocks.append(
+                    _make_resource_link(
+                        uri=uri,
+                        name=display_name,
+                        mime_type=content_type_single,
+                        size=entry.get("size_bytes"),
+                        description=entry.get("description") or entry.get("document_title"),
+                    )
                 )
-            )
-    return ToolResult(content=blocks, structured_content=payload)
+    structured = payload if _structured_downloads_enabled() else None
+    return ToolResult(content=blocks, structured_content=structured)
 
 
 class _DeleteOnSuccess:
