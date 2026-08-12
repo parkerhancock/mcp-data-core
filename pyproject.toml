@@ -1,6 +1,6 @@
 [project]
 name = "mcp-data-core"
-version = "0.11.0"
+version = "0.11.1"
 description = "Shared async HTTP scaffolding, response envelopes, corpus storage, and MCP server plumbing for data-fetching research toolkits."
 readme = "README.md"
 authors = [
@@ -55,6 +55,9 @@ build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/mcp_data_core"]
+
+[tool.uv]
+exclude-newer = "7 days"
 
 [dependency-groups]
 dev = [
