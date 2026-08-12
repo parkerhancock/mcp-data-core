@@ -14,7 +14,7 @@ from tenacity import (
     wait_exponential_jitter,
 )
 
-from .exceptions import ApiError, RateLimitError
+from .exceptions import ApiError, RateLimitError, RetryableAuthenticationError
 
 T = TypeVar("T")
 P = ParamSpec("P")
@@ -27,6 +27,8 @@ def is_retryable_error(exc: BaseException) -> bool:
     # RateLimitError (429) is always retryable, even if no status_code was
     # attached — backoff is the correct response regardless.
     if isinstance(exc, RateLimitError):
+        return True
+    if isinstance(exc, RetryableAuthenticationError):
         return True
     # Typed API errors carry the upstream status code. BaseAsyncClient raises
     # these (via ``_raise_for_status``) instead of httpx's HTTPStatusError, so

@@ -29,6 +29,7 @@ from mcp_data_core.exceptions import (
     McpDataCoreError,
     NotFoundError,
     RateLimitError,
+    RetryableAuthenticationError,
     ServerError,
 )
 
@@ -62,11 +63,13 @@ def _friendly_message(tool_name: str, exc: BaseException) -> str | None:
         return f"{RETRYABLE} Upstream server error: {exc}"
     if isinstance(exc, NotFoundError):
         return f"{NOT_RETRYABLE} Not found: {exc}"
+    if isinstance(exc, RetryableAuthenticationError):
+        return f"{RETRYABLE} The request could not be completed. Please retry shortly."
     if isinstance(exc, AuthenticationError):
-        # Keep the exception text: it carries actionable detail (which
-        # upstream, what it said) that operators need to triage credential
-        # incidents, and some sources raise deliberate client-facing hints.
-        return f"{NOT_RETRYABLE} Upstream authentication failed: {exc}"
+        return (
+            f"{NOT_RETRYABLE} The request could not be completed. "
+            "Retrying is unlikely to help. Please contact support."
+        )
     if isinstance(exc, ConfigurationError):
         return f"{NOT_RETRYABLE} Server misconfiguration: {exc}"
     if isinstance(exc, McpDataCoreError):

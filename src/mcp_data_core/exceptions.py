@@ -57,6 +57,10 @@ class AuthenticationError(ApiError):
     """Authentication failed (401/403)."""
 
 
+class RetryableAuthenticationError(AuthenticationError):
+    """Temporary authentication failure that is safe to retry."""
+
+
 class ServerError(ApiError):
     """Server-side error (5xx)."""
 
@@ -103,6 +107,7 @@ __all__ = [
     "NotFoundError",
     "RateLimitError",
     "AuthenticationError",
+    "RetryableAuthenticationError",
     "ServerError",
     "ValidationError",
     "ConfigurationError",
