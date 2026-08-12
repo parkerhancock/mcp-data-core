@@ -199,8 +199,32 @@ async def test_friendly_errors_maps_typed_exception() -> None:
     from mcp_data_core.mcp.middleware import FriendlyErrors
 
     exc = RateLimitError("slow down", status_code=429)
-    with pytest.raises(ToolError, match=r"\[retryable\] Rate limited by upstream"):
+    with pytest.raises(
+        ToolError,
+        match=(
+            r"^\[retryable\] The request could not be completed\. "
+            r"Please retry shortly\.$"
+        ),
+    ) as excinfo:
         await FriendlyErrors().on_call_tool(_fake_context(), _raiser(exc))
+    assert "slow down" not in str(excinfo.value)
+
+
+async def test_friendly_errors_maps_transport_error_without_exposing_cause() -> None:
+    import httpx
+
+    from mcp_data_core.mcp.middleware import FriendlyErrors
+
+    exc = httpx.ConnectError("internal-host.example refused the connection")
+    with pytest.raises(
+        ToolError,
+        match=(
+            r"^\[retryable\] The request could not be completed\. "
+            r"Please retry shortly\.$"
+        ),
+    ) as excinfo:
+        await FriendlyErrors().on_call_tool(_fake_context(), _raiser(exc))
+    assert "internal-host" not in str(excinfo.value)
 
 
 async def test_friendly_errors_maps_retryable_auth_without_exposing_cause() -> None:
@@ -262,8 +286,15 @@ async def test_friendly_errors_walks_nested_cause_chain() -> None:
         except ToolError as wrapped_exc:
             wrapped = wrapped_exc
 
-    with pytest.raises(ToolError, match=r"\[retryable\] Upstream server error"):
+    with pytest.raises(
+        ToolError,
+        match=(
+            r"^\[retryable\] The request could not be completed\. "
+            r"Please retry shortly\.$"
+        ),
+    ) as excinfo:
         await FriendlyErrors().on_call_tool(_fake_context(), _raiser(wrapped))
+    assert "upstream" not in str(excinfo.value)
 
 
 async def test_friendly_errors_passes_through_deliberate_toolerror() -> None:
