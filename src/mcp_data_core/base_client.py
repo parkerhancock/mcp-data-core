@@ -22,6 +22,34 @@ from .resilience import default_retryer
 
 logger = logging.getLogger(__name__)
 
+_SENSITIVE_QUERY_PARAMETERS = frozenset(
+    {
+        "access_token",
+        "api_key",
+        "key",
+        "refresh_token",
+        "servicekey",
+        "tk",
+        "token",
+    }
+)
+
+
+def _redact_url_query(url: str) -> str:
+    """Redact credential query values while preserving the rest of the URL."""
+    base, separator, remainder = url.partition("?")
+    if not separator:
+        return url
+    query, fragment_separator, fragment = remainder.partition("#")
+    parameters = []
+    for parameter in query.split("&"):
+        name, value_separator, _value = parameter.partition("=")
+        if value_separator and name.lower() in _SENSITIVE_QUERY_PARAMETERS:
+            parameter = f"{name}=[REDACTED]"
+        parameters.append(parameter)
+    redacted = "&".join(parameters)
+    return f"{base}?{redacted}{fragment_separator}{fragment}"
+
 
 class BaseAsyncClient:
     """Base class for async API clients with caching and retry support.
@@ -233,7 +261,7 @@ class BaseAsyncClient:
         logger.error(
             "%s %s -> %s\nResponse body: %s",
             response.request.method,
-            response.request.url,
+            _redact_url_query(str(response.request.url)),
             status,
             body,
         )

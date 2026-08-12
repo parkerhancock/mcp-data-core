@@ -286,11 +286,22 @@ def sign_path(path: str, *, bucket: int | str | None = None) -> str:
     explicit integer for testing, or the string ``"permanent"`` for a
     URL that never expires (the sentinel is also accepted by
     ``verify_path``).
+
+    Raises:
+        RuntimeError: If no HMAC signing secret is configured.
     """
+    secret = _secret()
+    if not secret:
+        raise RuntimeError(
+            "Public download URLs require LAW_TOOLS_CORE_API_KEY as an HMAC signing secret; "
+            "OAuth does not protect the public /downloads route. Set the secret, or leave "
+            "LAW_TOOLS_CORE_PUBLIC_URL and LAW_TOOLS_CORE_DOWNLOAD_BASE_URL unset for "
+            "local/stdio mode."
+        )
     if bucket is None:
         bucket = _current_bucket()
     payload = f"{path}|{bucket}".encode()
-    sig = hmac.new(_secret().encode(), payload, hashlib.sha256).digest()
+    sig = hmac.new(secret.encode(), payload, hashlib.sha256).digest()
     return base64.urlsafe_b64encode(sig[:9]).rstrip(b"=").decode()  # 9 bytes → 12 chars
 
 
@@ -302,9 +313,11 @@ def verify_path(path: str, signature: str) -> bool:
     or the special ``"permanent"`` bucket. There is no ``exp`` query
     parameter — the time dimension lives inside the HMAC. The agent
     reads ``expires_at`` from the tool response to know when to re-call.
+    Verification fails closed when no signing secret is configured;
+    local/stdio mode does not mint URLs for this route.
     """
     if not _secret():
-        return True  # no secret configured (local/stdio mode)
+        return False
     current = _current_bucket()
     candidate_buckets: tuple[int | str, ...] = (current, current - 1, _PERMANENT_BUCKET)
     for bucket in candidate_buckets:

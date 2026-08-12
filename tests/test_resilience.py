@@ -12,8 +12,9 @@ from __future__ import annotations
 import httpx
 import pytest
 
-from mcp_data_core.base_client import BaseAsyncClient
+from mcp_data_core.base_client import BaseAsyncClient, _redact_url_query
 from mcp_data_core.exceptions import (
+    ApiError,
     AuthenticationError,
     NotFoundError,
     RateLimitError,
@@ -119,3 +120,39 @@ class TestRequestRetries:
                 await c._request("GET", "/doc")
 
         assert calls["n"] == 1  # no retries on a 404
+
+
+class TestHttpErrorLogging:
+    @pytest.mark.asyncio
+    async def test_sensitive_query_values_are_redacted(self, caplog) -> None:
+        def handler(_request: httpx.Request) -> httpx.Response:
+            return httpx.Response(400, text="bad request")
+
+        path = (
+            "/doc?api_key=alpha&ServiceKey=bravo&TK=charlie&Key=delta&ToKeN=echo"
+            "&access_token=foxtrot&Refresh_Token=golf&normal=a%2Fb"
+        )
+        async with _client(handler, max_retries=1) as client:
+            with caplog.at_level("ERROR", logger="mcp_data_core.base_client"):
+                with pytest.raises(ApiError):
+                    await client._request("GET", path)
+
+        log_text = caplog.text
+        for secret in ("alpha", "bravo", "charlie", "delta", "echo", "foxtrot", "golf"):
+            assert secret not in log_text
+        assert "api_key=[REDACTED]" in log_text
+        assert "ServiceKey=[REDACTED]" in log_text
+        assert "TK=[REDACTED]" in log_text
+        assert "Key=[REDACTED]" in log_text
+        assert "ToKeN=[REDACTED]" in log_text
+        assert "access_token=[REDACTED]" in log_text
+        assert "Refresh_Token=[REDACTED]" in log_text
+        assert "normal=a%2Fb" in log_text
+
+    def test_normal_query_url_is_unchanged(self) -> None:
+        url = (
+            "https://example.test/doc?not_api_key=alpha&monkey=bravo"
+            "&accessToken=charlie&redirect=https%3A%2F%2Fother.test%2Fa%3Fkey%3Dvalue"
+        )
+
+        assert _redact_url_query(url) == url
