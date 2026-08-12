@@ -14,12 +14,14 @@ uv add "mcp-data-core[mcp]"    # + FastMCP server helpers
 ```python
 from mcp_data_core import BaseAsyncClient
 
+
 class MyApiClient(BaseAsyncClient):
     DEFAULT_BASE_URL = "https://api.example.com"
     CACHE_NAME = "my_api"
 
     async def get_thing(self, id: str) -> dict:
         return await self._request_json("GET", f"/things/{id}")
+
 
 async with MyApiClient() as client:
     result = await client.get_thing("42")
@@ -69,9 +71,7 @@ class UsptoOdpClient(BaseAsyncClient):
             raise ConfigurationError("USPTO_ODP_API_KEY required")
         super().__init__(headers={"X-API-KEY": api_key}, **kwargs)
 
-    async def search_applications(
-        self, query: str, *, limit: int = 25
-    ) -> ListEnvelope[dict]:
+    async def search_applications(self, query: str, *, limit: int = 25) -> ListEnvelope[dict]:
         payload = await self._request_json(
             "POST",
             "/api/v1/patent/applications/search",
