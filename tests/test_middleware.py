@@ -159,9 +159,7 @@ async def test_tool_call_logger_adds_only_pseudonymous_actor(
     async def call_next(_context):
         return {"ok": True}
 
-    assert await fresh_middleware.ToolCallLogger().on_call_tool(context, call_next) == {
-        "ok": True
-    }
+    assert await fresh_middleware.ToolCallLogger().on_call_tool(context, call_next) == {"ok": True}
     record = json.loads(capsys.readouterr().out.strip())
     assert record["actor_id"] == fresh_middleware.pseudonymous_actor_id(
         email,
@@ -201,8 +199,48 @@ async def test_friendly_errors_maps_typed_exception() -> None:
     from mcp_data_core.mcp.middleware import FriendlyErrors
 
     exc = RateLimitError("slow down", status_code=429)
-    with pytest.raises(ToolError, match=r"\[retryable\] Rate limited by upstream"):
+    with pytest.raises(
+        ToolError,
+        match=(
+            r"^\[retryable\] The request could not be completed\. "
+            r"Please retry shortly\.$"
+        ),
+    ) as excinfo:
         await FriendlyErrors().on_call_tool(_fake_context(), _raiser(exc))
+    assert "slow down" not in str(excinfo.value)
+
+
+async def test_friendly_errors_maps_transport_error_without_exposing_cause() -> None:
+    import httpx
+
+    from mcp_data_core.mcp.middleware import FriendlyErrors
+
+    exc = httpx.ConnectError("internal-host.example refused the connection")
+    with pytest.raises(
+        ToolError,
+        match=(
+            r"^\[retryable\] The request could not be completed\. "
+            r"Please retry shortly\.$"
+        ),
+    ) as excinfo:
+        await FriendlyErrors().on_call_tool(_fake_context(), _raiser(exc))
+    assert "internal-host" not in str(excinfo.value)
+
+
+async def test_friendly_errors_maps_retryable_auth_without_exposing_cause() -> None:
+    from mcp_data_core.exceptions import RetryableAuthenticationError
+    from mcp_data_core.mcp.middleware import FriendlyErrors
+
+    exc = RetryableAuthenticationError("EPO OPS rejected a refreshed access token", 400)
+    with pytest.raises(
+        ToolError,
+        match=(
+            r"^\[retryable\] The request could not be completed\. "
+            r"Please retry shortly\.$"
+        ),
+    ) as excinfo:
+        await FriendlyErrors().on_call_tool(_fake_context(), _raiser(exc))
+    assert "EPO" not in str(excinfo.value)
 
 
 async def test_friendly_errors_maps_toolerror_wrapping_typed_cause() -> None:
@@ -224,11 +262,14 @@ async def test_friendly_errors_maps_toolerror_wrapping_typed_cause() -> None:
 
     with pytest.raises(
         ToolError,
-        match=r"\[not-retryable\] Upstream authentication failed: "
-        r"PACER authentication failed",
+        match=(
+            r"^\[not-retryable\] The request could not be completed\. "
+            r"Retrying is unlikely to help\. Please contact support\.$"
+        ),
     ) as excinfo:
         await FriendlyErrors().on_call_tool(_fake_context(), _raiser(wrapped))
     assert excinfo.value.__cause__ is cause
+    assert "PACER" not in str(excinfo.value)
 
 
 async def test_friendly_errors_walks_nested_cause_chain() -> None:
@@ -245,8 +286,15 @@ async def test_friendly_errors_walks_nested_cause_chain() -> None:
         except ToolError as wrapped_exc:
             wrapped = wrapped_exc
 
-    with pytest.raises(ToolError, match=r"\[retryable\] Upstream server error"):
+    with pytest.raises(
+        ToolError,
+        match=(
+            r"^\[retryable\] The request could not be completed\. "
+            r"Please retry shortly\.$"
+        ),
+    ) as excinfo:
         await FriendlyErrors().on_call_tool(_fake_context(), _raiser(wrapped))
+    assert "upstream" not in str(excinfo.value)
 
 
 async def test_friendly_errors_passes_through_deliberate_toolerror() -> None:
@@ -296,8 +344,10 @@ async def test_friendly_errors_end_to_end_over_fastmcp() -> None:
     async with Client(server) as client:
         with pytest.raises(
             ToolError,
-            match=r"^\[not-retryable\] Upstream authentication failed: "
-            r"PACER authentication failed: Invalid username or password",
+            match=(
+                r"^\[not-retryable\] The request could not be completed\. "
+                r"Retrying is unlikely to help\. Please contact support\.$"
+            ),
         ):
             await client.call_tool("pacer_tool", {})
         with pytest.raises(ToolError, match="^deliberate client-facing message$"):

@@ -28,6 +28,7 @@ from .exceptions import (
     NotFoundError,
     ParseError,
     RateLimitError,
+    RetryableAuthenticationError,
     ServerError,
     ValidationError,
 )
@@ -61,6 +62,7 @@ __all__ = [
     "NotFoundError",
     "RateLimitError",
     "AuthenticationError",
+    "RetryableAuthenticationError",
     "ServerError",
     "ValidationError",
     "ConfigurationError",

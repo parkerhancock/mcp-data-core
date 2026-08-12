@@ -18,6 +18,7 @@ from mcp_data_core.exceptions import (
     AuthenticationError,
     NotFoundError,
     RateLimitError,
+    RetryableAuthenticationError,
     ServerError,
 )
 from mcp_data_core.resilience import is_retryable_error
@@ -59,6 +60,9 @@ class TestIsRetryableError:
 
     def test_auth_error_is_not_retryable(self) -> None:
         assert is_retryable_error(AuthenticationError("nope", 403)) is False
+
+    def test_retryable_auth_error_is_retryable(self) -> None:
+        assert is_retryable_error(RetryableAuthenticationError("try again", 400)) is True
 
     def test_transport_error_is_retryable(self) -> None:
         assert is_retryable_error(httpx.ConnectError("refused")) is True

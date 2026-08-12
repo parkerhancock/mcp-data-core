@@ -29,6 +29,7 @@ from mcp_data_core.exceptions import (
     McpDataCoreError,
     NotFoundError,
     RateLimitError,
+    RetryableAuthenticationError,
     ServerError,
 )
 
@@ -42,33 +43,31 @@ _friendly_logger = logging.getLogger(__name__ + ".friendly")
 
 RETRYABLE = "[retryable]"
 NOT_RETRYABLE = "[not-retryable]"
+RETRYABLE_MESSAGE = f"{RETRYABLE} The request could not be completed. Please retry shortly."
+NOT_RETRYABLE_INTERNAL_MESSAGE = (
+    f"{NOT_RETRYABLE} The request could not be completed. "
+    "Retrying is unlikely to help. Please contact support."
+)
 
 
-def _friendly_message(tool_name: str, exc: BaseException) -> str | None:
+def _friendly_message(exc: BaseException) -> str | None:
     """Map an exception to a clean client-facing message, or None to pass through."""
     if isinstance(exc, (httpx.ReadError, httpx.ConnectError, httpx.RemoteProtocolError)):
-        return (
-            f"{RETRYABLE} Upstream service dropped the connection while "
-            f"handling {tool_name}. This is usually transient — please retry."
-        )
+        return RETRYABLE_MESSAGE
     if isinstance(exc, httpx.TimeoutException):
-        return (
-            f"{RETRYABLE} Upstream service timed out while handling {tool_name}. "
-            f"Retry, or narrow the request if possible."
-        )
+        return RETRYABLE_MESSAGE
     if isinstance(exc, RateLimitError):
-        return f"{RETRYABLE} Rate limited by upstream: {exc}"
+        return RETRYABLE_MESSAGE
     if isinstance(exc, ServerError):
-        return f"{RETRYABLE} Upstream server error: {exc}"
+        return RETRYABLE_MESSAGE
     if isinstance(exc, NotFoundError):
         return f"{NOT_RETRYABLE} Not found: {exc}"
+    if isinstance(exc, RetryableAuthenticationError):
+        return RETRYABLE_MESSAGE
     if isinstance(exc, AuthenticationError):
-        # Keep the exception text: it carries actionable detail (which
-        # upstream, what it said) that operators need to triage credential
-        # incidents, and some sources raise deliberate client-facing hints.
-        return f"{NOT_RETRYABLE} Upstream authentication failed: {exc}"
+        return NOT_RETRYABLE_INTERNAL_MESSAGE
     if isinstance(exc, ConfigurationError):
-        return f"{NOT_RETRYABLE} Server misconfiguration: {exc}"
+        return NOT_RETRYABLE_INTERNAL_MESSAGE
     if isinstance(exc, McpDataCoreError):
         return f"{NOT_RETRYABLE} {exc}"
     return None
@@ -94,7 +93,7 @@ class FriendlyErrors(Middleware):
             cause = exc.__cause__
             depth = 0
             while cause is not None and depth < 10:
-                message = _friendly_message(tool_name, cause)
+                message = _friendly_message(cause)
                 if message is not None:
                     _friendly_logger.warning(
                         "Remapping %s from %s: %s",
@@ -108,7 +107,7 @@ class FriendlyErrors(Middleware):
                 depth += 1
             raise
         except Exception as exc:
-            message = _friendly_message(tool_name, exc)
+            message = _friendly_message(exc)
             if message is None:
                 raise
             _friendly_logger.warning(

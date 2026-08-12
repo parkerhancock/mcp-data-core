@@ -13,8 +13,13 @@ def test_humanize_basic() -> None:
 
 
 def test_humanize_keeps_acronyms_upper() -> None:
-    assert _humanize_tool_name("search_fda_orange_book_products") == "Search FDA Orange Book Products"
-    assert _humanize_tool_name("query_cms_physician_fee_schedule") == "Query CMS Physician Fee Schedule"
+    assert (
+        _humanize_tool_name("search_fda_orange_book_products") == "Search FDA Orange Book Products"
+    )
+    assert (
+        _humanize_tool_name("query_cms_physician_fee_schedule")
+        == "Query CMS Physician Fee Schedule"
+    )
     assert _humanize_tool_name("search_nppes_providers") == "Search NPPES Providers"
 
 
