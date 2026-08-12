@@ -7,6 +7,7 @@ import io
 import os
 import time
 import zipfile
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -45,10 +46,10 @@ class TestHmac:
     def test_wrong_signature_rejected(self, _signing_secret) -> None:
         assert not downloads.verify_path("patents/X", "wrongsig")
 
-    def test_no_secret_allows_all(self, monkeypatch) -> None:
+    def test_no_secret_rejects_all(self, monkeypatch) -> None:
         monkeypatch.delenv("LAW_TOOLS_CORE_API_KEY", raising=False)
         monkeypatch.delenv("LAW_TOOLS_API_KEY", raising=False)
-        assert downloads.verify_path("anything", "bogus")
+        assert not downloads.verify_path("anything", "bogus")
 
     def test_permanent_bucket(self, _signing_secret) -> None:
         path = "patents/X"
@@ -105,6 +106,14 @@ class TestBuildDownloadUrl:
         monkeypatch.setenv("LAW_TOOLS_CORE_PUBLIC_URL", "https://mcp.example.com")
         url = downloads.build_download_url("patents/X")
         assert url.startswith("https://mcp.example.com/downloads/patents/X?key=")
+
+    def test_remote_mode_requires_signing_secret(self, monkeypatch) -> None:
+        monkeypatch.delenv("LAW_TOOLS_CORE_API_KEY", raising=False)
+        monkeypatch.delenv("LAW_TOOLS_API_KEY", raising=False)
+        monkeypatch.setenv("LAW_TOOLS_CORE_PUBLIC_URL", "https://mcp.example.com")
+
+        with pytest.raises(RuntimeError, match="API_KEY"):
+            downloads.build_download_url("patents/X")
 
     def test_label_prepended(self, monkeypatch) -> None:
         monkeypatch.setenv("LAW_TOOLS_CORE_API_KEY", "secret")
@@ -541,6 +550,39 @@ def _build_app():
     return Starlette(routes=[Route("/downloads/{path:path}", downloads.handle_download)])
 
 
+def test_oauth_only_server_rejects_unsigned_download(tmp_path, monkeypatch) -> None:
+    """The public custom route must not bypass OAuth when HMAC signing is unset."""
+    from starlette.testclient import TestClient
+
+    from mcp_data_core.mcp.auth import make_auth
+    from mcp_data_core.mcp.server_factory import build_server
+
+    monkeypatch.delenv("LAW_TOOLS_CORE_API_KEY", raising=False)
+    monkeypatch.delenv("LAW_TOOLS_API_KEY", raising=False)
+    monkeypatch.setenv("LAW_TOOLS_CORE_GOOGLE_OAUTH_CLIENT_ID", "google-client")
+    monkeypatch.setenv("LAW_TOOLS_CORE_GOOGLE_OAUTH_CLIENT_SECRET", "google-secret")
+    monkeypatch.setenv("LAW_TOOLS_CORE_PUBLIC_URL", "https://mcp.example.test")
+    monkeypatch.setenv("LAW_TOOLS_CORE_DOWNLOAD_CACHE", str(tmp_path / "cache"))
+
+    fetched = False
+
+    async def fetch(_path: str) -> tuple[bytes, str]:
+        nonlocal fetched
+        fetched = True
+        return b"private document", "document.pdf"
+
+    downloads.register_source("files", fetch)
+    auth = make_auth(client_storage=MagicMock())
+    assert auth is not None
+    app = build_server("test", "test", auth=auth).http_app()
+
+    with TestClient(app) as client:
+        response = client.get("/downloads/files/arbitrary")
+
+    assert response.status_code == 403
+    assert fetched is False
+
+
 class TestHandleDownloadBulkZip:
     def test_serves_and_deletes_on_success(self, tmp_path, monkeypatch) -> None:
         from starlette.testclient import TestClient
@@ -646,6 +688,7 @@ class TestResourceUri:
         self, tmp_path, monkeypatch
     ) -> None:
         monkeypatch.setenv("LAW_TOOLS_CORE_RESOURCES_ENABLED", "0")
+        monkeypatch.setenv("LAW_TOOLS_CORE_API_KEY", "secret")
         monkeypatch.setenv("LAW_TOOLS_CORE_PUBLIC_URL", "https://mcp.example.com")
         monkeypatch.setenv("LAW_TOOLS_CORE_DOWNLOAD_CACHE", str(tmp_path))
 
