@@ -8,6 +8,7 @@ import pytest
 from fastmcp.exceptions import ToolError
 from fastmcp.server.auth import MultiAuth
 from fastmcp.server.auth.providers.jwt import StaticTokenVerifier
+from fastmcp.server.auth.redirect_validation import validate_redirect_uri
 
 from mcp_data_core.mcp import auth as auth_module
 from mcp_data_core.mcp.auth import make_auth, make_domain_gate_middleware
@@ -198,6 +199,15 @@ class TestDefaultRedirectUris:
     def test_includes_claude_ai_web(self) -> None:
         assert "https://claude.ai/*" in auth_module._DEFAULT_MCP_REDIRECT_URIS
         assert "https://*.anthropic.com/*" in auth_module._DEFAULT_MCP_REDIRECT_URIS
+
+    def test_claude_desktop_callback_is_allowed_without_widening_the_scheme(self) -> None:
+        allowed = list(auth_module._DEFAULT_MCP_REDIRECT_URIS)
+
+        assert validate_redirect_uri("claude://claude.ai/mcp-auth-callback/sdk", allowed)
+        assert validate_redirect_uri("https://claude.ai/api/mcp/auth_callback", allowed)
+        assert validate_redirect_uri("http://localhost:53472/callback", allowed)
+        assert not validate_redirect_uri("claude://evil.example/mcp-auth-callback/sdk", allowed)
+        assert not validate_redirect_uri("claude://claude.ai/mcp-auth-callback/other", allowed)
 
     def test_includes_chatgpt_connector(self) -> None:
         # ChatGPT's connector OAuth callback is https://chatgpt.com/connector/

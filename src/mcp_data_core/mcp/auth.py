@@ -46,6 +46,8 @@ if TYPE_CHECKING:
 _DEFAULT_MCP_REDIRECT_URIS: tuple[str, ...] = (
     "https://claude.ai/*",
     "https://*.anthropic.com/*",
+    # Claude Desktop uses this custom-scheme callback in its Code tab.
+    "claude://claude.ai/mcp-auth-callback/sdk",
     # ChatGPT connector / Apps SDK OAuth callbacks land at
     # ``https://chatgpt.com/connector/oauth/<id>`` (legacy ``chat.openai.com``).
     # Required for any connector that lists in the ChatGPT App Directory.
