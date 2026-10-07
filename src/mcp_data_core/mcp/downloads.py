@@ -53,7 +53,7 @@ from pathlib import Path
 from typing import Protocol, runtime_checkable
 
 from fastmcp.resources import ResourceContent
-from fastmcp.tools.tool import ToolResult  # ty: ignore[unresolved-import]
+from fastmcp.tools import ToolResult
 from mcp.types import Annotations, ResourceLink, TextContent
 from starlette.requests import Request
 from starlette.responses import Response, StreamingResponse
