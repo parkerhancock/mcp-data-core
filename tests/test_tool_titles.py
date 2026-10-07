@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from fastmcp.tools.tool import Tool
+from fastmcp.tools import Tool
 
 from mcp_data_core.mcp.middleware import DefaultToolTitles, _humanize_tool_name
 
