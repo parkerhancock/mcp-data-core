@@ -34,6 +34,7 @@ from .exceptions import (
 )
 from .logging import configure, log_file_hint
 from .oauth2 import OAuth2ClientCredentialsAuth
+from .pacing import HostPacer, PacedTransport
 from .resilience import (
     RETRYABLE_STATUS_CODES,
     default_retryer,
@@ -72,6 +73,9 @@ __all__ = [
     "log_file_hint",
     # OAuth2
     "OAuth2ClientCredentialsAuth",
+    # Pacing
+    "HostPacer",
+    "PacedTransport",
     # Resilience
     "RETRYABLE_STATUS_CODES",
     "is_retryable_error",

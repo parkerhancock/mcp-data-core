@@ -12,8 +12,10 @@ from typing import Any
 
 import httpx
 from hishel import AsyncSqliteStorage  # type: ignore[attr-defined]
-from hishel.httpx import AsyncCacheClient  # type: ignore[attr-defined]
+from hishel.httpx import AsyncCacheClient, AsyncCacheTransport  # type: ignore[attr-defined]
 from tenacity import AsyncRetrying, stop_after_attempt, wait_exponential_jitter
+
+from .pacing import PacedTransport
 
 
 class RetryingAsyncSqliteStorage(AsyncSqliteStorage):  # ty: ignore[unsupported-base]
@@ -302,6 +304,7 @@ def build_cached_http_client(
     headers: Mapping[str, str] | None = None,
     timeout: float | None = None,
     auth: httpx.Auth | None = None,
+    min_request_interval: float = 0.0,
     **client_kwargs: Any,
 ) -> tuple[httpx.AsyncClient, CacheManager | None]:
     """Return an AsyncClient with optional caching and a CacheManager.
@@ -315,6 +318,9 @@ def build_cached_http_client(
         headers: Additional headers to include in requests.
         timeout: Request timeout in seconds (passes through to httpx).
         auth: httpx Auth handler (e.g. for OAuth2 token refresh).
+        min_request_interval: Minimum seconds between network requests to
+            the same host, shared across all clients in the process. Cache
+            hits don't wait. 0 disables pacing.
         **client_kwargs: Additional arguments for httpx.AsyncClient.
 
     Returns:
@@ -338,7 +344,18 @@ def build_cached_http_client(
     if auth is not None:
         extra["auth"] = auth
 
+    # Pacing needs its own transport chain. Passing ``transport=`` makes httpx
+    # ignore ``http2``, so it moves onto the network transport here.
+    network: httpx.AsyncBaseTransport | None = None
+    if min_request_interval > 0:
+        network = PacedTransport(
+            httpx.AsyncHTTPTransport(http2=bool(client_kwargs.pop("http2", False))),
+            min_request_interval,
+        )
+
     if not use_cache:
+        if network is not None:
+            extra["transport"] = network
         return httpx.AsyncClient(headers=merged_headers, **extra, **client_kwargs), None
 
     cache_root = cache_dir or get_default_cache_dir()
@@ -347,6 +364,9 @@ def build_cached_http_client(
 
     manager = CacheManager(database_path=db_path, ttl_seconds=ttl_seconds)
     storage = manager.get_storage()
+
+    if network is not None:
+        extra["transport"] = AsyncCacheTransport(next_transport=network, storage=storage)
 
     client = AsyncCacheClient(  # type: ignore[misc]
         headers=merged_headers,
