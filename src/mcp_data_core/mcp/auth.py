@@ -33,7 +33,6 @@ from typing import TYPE_CHECKING
 
 from fastmcp.exceptions import ToolError
 from fastmcp.server.auth import AuthProvider, MultiAuth, TokenVerifier
-from fastmcp.server.auth.providers.google import GoogleProvider
 from fastmcp.server.auth.providers.jwt import StaticTokenVerifier
 from fastmcp.server.dependencies import get_access_token
 from fastmcp.server.middleware import Middleware, MiddlewareContext
@@ -126,6 +125,10 @@ def make_auth(
                 "make_auth: Google OAuth requires base_url (pass arg or set "
                 "LAW_TOOLS_CORE_PUBLIC_URL)"
             )
+        # Imported here: the Google provider is slow to load and only needed
+        # when Google credentials are configured.
+        from fastmcp.server.auth.providers.google import GoogleProvider
+
         google = GoogleProvider(
             client_id=google_client_id,
             client_secret=google_client_secret,
