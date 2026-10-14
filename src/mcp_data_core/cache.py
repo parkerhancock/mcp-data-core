@@ -305,6 +305,7 @@ def build_cached_http_client(
     timeout: float | None = None,
     auth: httpx.Auth | None = None,
     min_request_interval: float = 0.0,
+    transport: httpx.AsyncBaseTransport | None = None,
     **client_kwargs: Any,
 ) -> tuple[httpx.AsyncClient, CacheManager | None]:
     """Return an AsyncClient with optional caching and a CacheManager.
@@ -321,6 +322,9 @@ def build_cached_http_client(
         min_request_interval: Minimum seconds between network requests to
             the same host, shared across all clients in the process. Cache
             hits don't wait. 0 disables pacing.
+        transport: Network transport to use in place of httpx's default
+            (e.g. ``httpx.MockTransport`` in tests). It sits below the cache
+            and pacing, so both still apply.
         **client_kwargs: Additional arguments for httpx.AsyncClient.
 
     Returns:
@@ -346,10 +350,10 @@ def build_cached_http_client(
 
     # Pacing needs its own transport chain. Passing ``transport=`` makes httpx
     # ignore ``http2``, so it moves onto the network transport here.
-    network: httpx.AsyncBaseTransport | None = None
+    network: httpx.AsyncBaseTransport | None = transport
     if min_request_interval > 0:
         network = PacedTransport(
-            httpx.AsyncHTTPTransport(http2=bool(client_kwargs.pop("http2", False))),
+            network or httpx.AsyncHTTPTransport(http2=bool(client_kwargs.pop("http2", False))),
             min_request_interval,
         )
 

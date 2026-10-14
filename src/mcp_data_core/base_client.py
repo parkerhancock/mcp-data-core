@@ -122,6 +122,7 @@ class BaseAsyncClient:
         auth: httpx.Auth | None = None,
         http2: bool | None = None,
         min_request_interval: float | None = None,
+        transport: httpx.AsyncBaseTransport | None = None,
     ) -> None:
         """Initialize the client.
 
@@ -141,6 +142,9 @@ class BaseAsyncClient:
             min_request_interval: Override ``MIN_REQUEST_INTERVAL``. Ignored
                 when ``client`` is passed; the caller owns that client's
                 transport.
+            transport: Network transport to use in place of httpx's default,
+                e.g. ``httpx.MockTransport`` in tests. Unlike ``client``, it
+                keeps this client's headers, auth, timeout, cache and pacing.
         """
         self.base_url = (base_url or self.DEFAULT_BASE_URL).rstrip("/")
         self._owns_client = client is None
@@ -167,6 +171,7 @@ class BaseAsyncClient:
                     if min_request_interval is None
                     else min_request_interval
                 ),
+                transport=transport,
             )
         else:
             self._client = client
