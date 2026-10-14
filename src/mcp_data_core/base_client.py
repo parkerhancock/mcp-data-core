@@ -251,7 +251,9 @@ class BaseAsyncClient:
         await self.close()
 
     def _build_url(self, path: str) -> str:
-        """Build a full URL from a path."""
+        """Build a full URL from a path; absolute http(s) URLs pass through unchanged."""
+        if path.startswith(("https://", "http://")):
+            return path
         return f"{self.base_url}{path}"
 
     def _raise_for_status(self, response: httpx.Response, context: str = "") -> None:
