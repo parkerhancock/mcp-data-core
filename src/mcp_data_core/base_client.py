@@ -4,7 +4,8 @@ from __future__ import annotations
 
 import contextlib
 import logging
-from datetime import timedelta
+from datetime import UTC, datetime, timedelta
+from email.utils import parsedate_to_datetime
 from pathlib import Path
 from typing import Any, Self
 
@@ -51,6 +52,18 @@ def _redact_url_query(url: str) -> str:
     return f"{base}?{redacted}{fragment_separator}{fragment}"
 
 
+def _parse_retry_after(raw: str | None) -> float | None:
+    """Read ``Retry-After`` as delay seconds or an HTTP date (RFC 9110 §10.2.3)."""
+    if raw is None:
+        return None
+    with contextlib.suppress(ValueError):
+        return float(raw)
+    with contextlib.suppress(TypeError, ValueError):
+        when = parsedate_to_datetime(raw)
+        return max(0.0, (when - datetime.now(UTC)).total_seconds())
+    return None
+
+
 class BaseAsyncClient:
     """Base class for async API clients with caching and retry support.
 
@@ -91,6 +104,9 @@ class BaseAsyncClient:
     CACHE_NAME: str = "default"
     DEFAULT_TIMEOUT: float = 30.0
     HTTP2: bool = False
+    # Minimum seconds between network requests to one host, shared by every
+    # client in the process. Set it to the upstream's published rate policy.
+    MIN_REQUEST_INTERVAL: float = 0.0
 
     def __init__(
         self,
@@ -105,6 +121,7 @@ class BaseAsyncClient:
         timeout: float | None = None,
         auth: httpx.Auth | None = None,
         http2: bool | None = None,
+        min_request_interval: float | None = None,
     ) -> None:
         """Initialize the client.
 
@@ -121,6 +138,9 @@ class BaseAsyncClient:
             http2: Enable HTTP/2 for the underlying client. Falls back to
                 the subclass ``HTTP2`` class attribute. Some upstream APIs
                 (e.g. api.publicrecords.copyright.gov) reject HTTP/1.1.
+            min_request_interval: Override ``MIN_REQUEST_INTERVAL``. Ignored
+                when ``client`` is passed; the caller owns that client's
+                transport.
         """
         self.base_url = (base_url or self.DEFAULT_BASE_URL).rstrip("/")
         self._owns_client = client is None
@@ -142,6 +162,11 @@ class BaseAsyncClient:
                 timeout=self._timeout,
                 auth=auth,
                 http2=resolved_http2,
+                min_request_interval=(
+                    self.MIN_REQUEST_INTERVAL
+                    if min_request_interval is None
+                    else min_request_interval
+                ),
             )
         else:
             self._client = client
@@ -226,7 +251,9 @@ class BaseAsyncClient:
         await self.close()
 
     def _build_url(self, path: str) -> str:
-        """Build a full URL from a path."""
+        """Build a full URL from a path; absolute http(s) URLs pass through unchanged."""
+        if path.startswith(("https://", "http://")):
+            return path
         return f"{self.base_url}{path}"
 
     def _raise_for_status(self, response: httpx.Response, context: str = "") -> None:
@@ -269,11 +296,7 @@ class BaseAsyncClient:
         if status == 404:
             raise NotFoundError(msg, status, body)
         if status == 429:
-            retry_after: float | None = None
-            raw = response.headers.get("Retry-After")
-            if raw is not None:
-                with contextlib.suppress(ValueError):
-                    retry_after = float(raw)
+            retry_after = _parse_retry_after(response.headers.get("Retry-After"))
             raise RateLimitError(msg, status, body, retry_after=retry_after)
         if status in (401, 403):
             raise AuthenticationError(msg, status, body)

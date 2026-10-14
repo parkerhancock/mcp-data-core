@@ -9,10 +9,12 @@ from typing import ParamSpec, TypeVar
 import httpx
 from tenacity import (
     AsyncRetrying,
+    RetryCallState,
     retry_if_exception,
     stop_after_attempt,
     wait_exponential_jitter,
 )
+from tenacity.wait import wait_base
 
 from .exceptions import ApiError, RateLimitError, RetryableAuthenticationError
 
@@ -46,11 +48,27 @@ def is_retryable_error(exc: BaseException) -> bool:
     return False
 
 
+class wait_retry_after(wait_base):
+    """Honor a 429's ``Retry-After`` (capped); otherwise defer to ``fallback``."""
+
+    def __init__(self, fallback: wait_base, max_retry_after: float) -> None:
+        self.fallback = fallback
+        self.max_retry_after = max_retry_after
+
+    def __call__(self, retry_state: RetryCallState) -> float:
+        outcome = retry_state.outcome
+        exc = outcome.exception() if outcome is not None and outcome.failed else None
+        if isinstance(exc, RateLimitError) and exc.retry_after is not None:
+            return max(0.0, min(exc.retry_after, self.max_retry_after))
+        return self.fallback(retry_state)
+
+
 def default_retryer(
     *,
     max_attempts: int = 4,
     initial_wait: float = 1.0,
     max_wait: float = 20.0,
+    max_retry_after: float = 60.0,
 ) -> AsyncRetrying:
     """Create a standard retryer for API calls.
 
@@ -58,13 +76,16 @@ def default_retryer(
         max_attempts: Maximum number of attempts (including initial).
         initial_wait: Initial wait time in seconds.
         max_wait: Maximum wait time in seconds.
+        max_retry_after: Longest ``Retry-After`` the retryer will sleep for.
 
     Returns:
         Configured AsyncRetrying instance.
     """
     return AsyncRetrying(
         stop=stop_after_attempt(max_attempts),
-        wait=wait_exponential_jitter(initial=initial_wait, max=max_wait),
+        wait=wait_retry_after(
+            wait_exponential_jitter(initial=initial_wait, max=max_wait), max_retry_after
+        ),
         retry=retry_if_exception(is_retryable_error),
         reraise=True,
     )
@@ -110,5 +131,6 @@ __all__ = [
     "RETRYABLE_STATUS_CODES",
     "is_retryable_error",
     "default_retryer",
+    "wait_retry_after",
     "with_retry",
 ]
