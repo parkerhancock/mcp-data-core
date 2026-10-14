@@ -7,10 +7,18 @@ Provides the infrastructure that consumers build on:
 - HTTP caching utilities (``CacheManager``, ``build_cached_http_client``)
 - Resilience utilities (``default_retryer``, ``with_retry``)
 - File-based logging configured per consumer app (``configure``)
+- Domain-free identifier routing (``CitationRouter``, ``Route``)
 """
 
 from .base_client import BaseAsyncClient
 from .cache import CacheManager, CacheStats, build_cached_http_client
+from .citation_router import (
+    AmbiguousCitationError,
+    CitationRouter,
+    NoRouteError,
+    Route,
+    RouteMatch,
+)
 from .envelope import (
     ListEnvelope,
     Provenance,
@@ -49,6 +57,12 @@ __all__ = [
     "build_cached_http_client",
     "CacheManager",
     "CacheStats",
+    # Citation routing
+    "AmbiguousCitationError",
+    "CitationRouter",
+    "NoRouteError",
+    "Route",
+    "RouteMatch",
     # Envelope
     "Provenance",
     "ResponseEnvelope",
