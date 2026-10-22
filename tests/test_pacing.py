@@ -8,7 +8,7 @@ from datetime import UTC, datetime, timedelta
 from email.utils import format_datetime
 from pathlib import Path
 
-import httpx
+import httpx2
 import pytest
 from tenacity import RetryCallState
 
@@ -19,19 +19,19 @@ from mcp_data_core.pacing import HostPacer, PacedTransport
 from mcp_data_core.resilience import default_retryer, wait_retry_after
 
 
-class _RecordingTransport(httpx.AsyncBaseTransport):
+class _RecordingTransport(httpx2.AsyncBaseTransport):
     def __init__(self) -> None:
         self.sent_at: list[tuple[str, float]] = []
 
-    async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
+    async def handle_async_request(self, request: httpx2.Request) -> httpx2.Response:
         self.sent_at.append((request.url.host, time.monotonic()))
-        return httpx.Response(200, json={"ok": True}, headers={"Cache-Control": "max-age=60"})
+        return httpx2.Response(200, json={"ok": True}, headers={"Cache-Control": "max-age=60"})
 
 
 async def test_pacer_spaces_concurrent_requests_to_one_host() -> None:
     pacer = HostPacer()
     inner = _RecordingTransport()
-    async with httpx.AsyncClient(transport=PacedTransport(inner, 0.05, pacer)) as client:
+    async with httpx2.AsyncClient(transport=PacedTransport(inner, 0.05, pacer)) as client:
         await asyncio.gather(*(client.get(f"https://a.test/{i}") for i in range(4)))
 
     times = [at for _, at in inner.sent_at]
@@ -42,7 +42,7 @@ async def test_pacer_spaces_concurrent_requests_to_one_host() -> None:
 async def test_pacer_does_not_delay_other_hosts() -> None:
     pacer = HostPacer()
     inner = _RecordingTransport()
-    async with httpx.AsyncClient(transport=PacedTransport(inner, 1.0, pacer)) as client:
+    async with httpx2.AsyncClient(transport=PacedTransport(inner, 1.0, pacer)) as client:
         started = time.monotonic()
         await asyncio.gather(client.get("https://a.test/"), client.get("https://b.test/"))
 
@@ -68,8 +68,8 @@ def test_pacer_works_across_event_loops() -> None:
 
 async def test_cache_hits_skip_pacing(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     inner = _RecordingTransport()
-    real = httpx.AsyncHTTPTransport
-    monkeypatch.setattr(httpx, "AsyncHTTPTransport", lambda **_kwargs: inner)
+    real = httpx2.AsyncHTTPTransport
+    monkeypatch.setattr(httpx2, "AsyncHTTPTransport", lambda **_kwargs: inner)
     try:
         client, manager = build_cached_http_client(
             use_cache=True,
@@ -78,7 +78,7 @@ async def test_cache_hits_skip_pacing(tmp_path: Path, monkeypatch: pytest.Monkey
             min_request_interval=0.5,
         )
     finally:
-        monkeypatch.setattr(httpx, "AsyncHTTPTransport", real)
+        monkeypatch.setattr(httpx2, "AsyncHTTPTransport", real)
 
     async with client:
         await client.get("https://a.test/same")

@@ -1,7 +1,7 @@
-"""OAuth 2.0 client_credentials authentication for httpx clients.
+"""OAuth 2.0 client_credentials authentication for httpx2 clients.
 
-Generic httpx.Auth implementation of RFC 6749 §4.4 client_credentials grant.
-Use as the ``auth=`` argument to ``BaseAsyncClient`` (or any httpx client).
+Generic httpx2.Auth implementation of RFC 6749 §4.4 client_credentials grant.
+Use as the ``auth=`` argument to ``BaseAsyncClient`` (or any httpx2 client).
 
 Token caching:
     First request fetches a token, then injects ``Authorization: Bearer ...``.
@@ -39,7 +39,7 @@ import datetime as dt
 import logging
 from collections.abc import Generator
 
-import httpx
+import httpx2
 
 from .exceptions import AuthenticationError
 
@@ -49,8 +49,8 @@ _EXPIRY_SAFETY_MARGIN = dt.timedelta(seconds=30)
 _FALLBACK_TOKEN_LIFETIME = dt.timedelta(seconds=3600)
 
 
-class OAuth2ClientCredentialsAuth(httpx.Auth):
-    """RFC 6749 §4.4 client_credentials grant for httpx clients.
+class OAuth2ClientCredentialsAuth(httpx2.Auth):
+    """RFC 6749 §4.4 client_credentials grant for httpx2 clients.
 
     See module docstring for the full contract.
     """
@@ -77,7 +77,9 @@ class OAuth2ClientCredentialsAuth(httpx.Auth):
         self._access_token: str | None = None
         self._expires_at: dt.datetime | None = None
 
-    def auth_flow(self, request: httpx.Request) -> Generator[httpx.Request, httpx.Response, None]:
+    def auth_flow(
+        self, request: httpx2.Request
+    ) -> Generator[httpx2.Request, httpx2.Response, None]:
         # Stage 1: ensure we have a token (cached or freshly minted), send the request.
         if self._token_expired():
             token_response = yield self._build_token_request()
@@ -100,7 +102,7 @@ class OAuth2ClientCredentialsAuth(httpx.Auth):
             return True
         return dt.datetime.now(dt.UTC) >= self._expires_at - _EXPIRY_SAFETY_MARGIN
 
-    def _build_token_request(self) -> httpx.Request:
+    def _build_token_request(self) -> httpx2.Request:
         data: dict[str, str] = {"grant_type": "client_credentials"}
         if self._scope:
             data["scope"] = self._scope
@@ -114,9 +116,9 @@ class OAuth2ClientCredentialsAuth(httpx.Auth):
             credentials = f"{self._client_id}:{self._client_secret}".encode()
             headers["Authorization"] = "Basic " + base64.b64encode(credentials).decode("ascii")
 
-        return httpx.Request("POST", self._token_url, headers=headers, data=data)
+        return httpx2.Request("POST", self._token_url, headers=headers, data=data)
 
-    def _parse_token_response(self, response: httpx.Response) -> None:
+    def _parse_token_response(self, response: httpx2.Response) -> None:
         if response.status_code != 200:
             body_preview = response.text[:500] if response.text else ""
             raise AuthenticationError(

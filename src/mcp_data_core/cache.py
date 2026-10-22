@@ -10,9 +10,9 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 
-import httpx
+import httpx2
 from hishel import AsyncSqliteStorage  # type: ignore[attr-defined]
-from hishel.httpx import AsyncCacheClient, AsyncCacheTransport  # type: ignore[attr-defined]
+from hishel.httpx2 import AsyncCacheClient, AsyncCacheTransport  # type: ignore[attr-defined]
 from tenacity import AsyncRetrying, stop_after_attempt, wait_exponential_jitter
 
 from .pacing import PacedTransport
@@ -303,11 +303,11 @@ def build_cached_http_client(
     ttl_seconds: int | None = None,
     headers: Mapping[str, str] | None = None,
     timeout: float | None = None,
-    auth: httpx.Auth | None = None,
+    auth: httpx2.Auth | None = None,
     min_request_interval: float = 0.0,
-    transport: httpx.AsyncBaseTransport | None = None,
+    transport: httpx2.AsyncBaseTransport | None = None,
     **client_kwargs: Any,
-) -> tuple[httpx.AsyncClient, CacheManager | None]:
+) -> tuple[httpx2.AsyncClient, CacheManager | None]:
     """Return an AsyncClient with optional caching and a CacheManager.
 
     Args:
@@ -317,15 +317,15 @@ def build_cached_http_client(
             cache dir (``~/.cache/{app_name}``).
         ttl_seconds: Default TTL for cache entries. None uses HTTP headers.
         headers: Additional headers to include in requests.
-        timeout: Request timeout in seconds (passes through to httpx).
-        auth: httpx Auth handler (e.g. for OAuth2 token refresh).
+        timeout: Request timeout in seconds (passes through to httpx2).
+        auth: httpx2 Auth handler (e.g. for OAuth2 token refresh).
         min_request_interval: Minimum seconds between network requests to
             the same host, shared across all clients in the process. Cache
             hits don't wait. 0 disables pacing.
-        transport: Network transport to use in place of httpx's default
-            (e.g. ``httpx.MockTransport`` in tests). It sits below the cache
+        transport: Network transport to use in place of httpx2's default
+            (e.g. ``httpx2.MockTransport`` in tests). It sits below the cache
             and pacing, so both still apply.
-        **client_kwargs: Additional arguments for httpx.AsyncClient.
+        **client_kwargs: Additional arguments for httpx2.AsyncClient.
 
     Returns:
         Tuple of (client, cache_manager). cache_manager is None if use_cache=False.
@@ -344,23 +344,23 @@ def build_cached_http_client(
 
     extra: dict[str, Any] = {}
     if timeout is not None:
-        extra["timeout"] = httpx.Timeout(timeout)
+        extra["timeout"] = httpx2.Timeout(timeout)
     if auth is not None:
         extra["auth"] = auth
 
-    # Pacing needs its own transport chain. Passing ``transport=`` makes httpx
+    # Pacing needs its own transport chain. Passing ``transport=`` makes httpx2
     # ignore ``http2``, so it moves onto the network transport here.
-    network: httpx.AsyncBaseTransport | None = transport
+    network: httpx2.AsyncBaseTransport | None = transport
     if min_request_interval > 0:
         network = PacedTransport(
-            network or httpx.AsyncHTTPTransport(http2=bool(client_kwargs.pop("http2", False))),
+            network or httpx2.AsyncHTTPTransport(http2=bool(client_kwargs.pop("http2", False))),
             min_request_interval,
         )
 
     if not use_cache:
         if network is not None:
             extra["transport"] = network
-        return httpx.AsyncClient(headers=merged_headers, **extra, **client_kwargs), None
+        return httpx2.AsyncClient(headers=merged_headers, **extra, **client_kwargs), None
 
     cache_root = cache_dir or get_default_cache_dir()
     cache_root.mkdir(parents=True, exist_ok=True)

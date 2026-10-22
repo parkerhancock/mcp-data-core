@@ -5,7 +5,7 @@ from __future__ import annotations
 import base64
 import datetime as dt
 
-import httpx
+import httpx2
 import pytest
 
 from mcp_data_core.exceptions import AuthenticationError
@@ -24,22 +24,22 @@ class _Recorder:
     """
 
     def __init__(self) -> None:
-        self.requests: list[httpx.Request] = []
+        self.requests: list[httpx2.Request] = []
 
 
-def _make_token_response(access_token: str = "tok-1", expires_in: int = 3600) -> httpx.Response:
-    return httpx.Response(
+def _make_token_response(access_token: str = "tok-1", expires_in: int = 3600) -> httpx2.Response:
+    return httpx2.Response(
         200,
         json={"access_token": access_token, "token_type": "Bearer", "expires_in": expires_in},
     )
 
 
 def _make_transport(handler):
-    return httpx.MockTransport(handler)
+    return httpx2.MockTransport(handler)
 
 
-def _async_client(auth: OAuth2ClientCredentialsAuth, handler) -> httpx.AsyncClient:
-    return httpx.AsyncClient(transport=_make_transport(handler), auth=auth)
+def _async_client(auth: OAuth2ClientCredentialsAuth, handler) -> httpx2.AsyncClient:
+    return httpx2.AsyncClient(transport=_make_transport(handler), auth=auth)
 
 
 class TestTokenAcquisition:
@@ -47,12 +47,12 @@ class TestTokenAcquisition:
     async def test_first_request_fetches_token_and_injects_header(self) -> None:
         rec = _Recorder()
 
-        def handler(request: httpx.Request) -> httpx.Response:
+        def handler(request: httpx2.Request) -> httpx2.Response:
             rec.requests.append(request)
             if str(request.url) == TOKEN_URL:
                 return _make_token_response("alpha", expires_in=3600)
             assert request.headers["Authorization"] == "Bearer alpha"
-            return httpx.Response(200, json={"ok": True})
+            return httpx2.Response(200, json={"ok": True})
 
         auth = OAuth2ClientCredentialsAuth(
             token_url=TOKEN_URL, client_id="cid", client_secret="csec"
@@ -78,11 +78,11 @@ class TestTokenAcquisition:
     async def test_credentials_in_body_skips_basic_auth(self) -> None:
         rec = _Recorder()
 
-        def handler(request: httpx.Request) -> httpx.Response:
+        def handler(request: httpx2.Request) -> httpx2.Response:
             rec.requests.append(request)
             if str(request.url) == TOKEN_URL:
                 return _make_token_response()
-            return httpx.Response(200)
+            return httpx2.Response(200)
 
         auth = OAuth2ClientCredentialsAuth(
             token_url=TOKEN_URL,
@@ -103,11 +103,11 @@ class TestTokenAcquisition:
     async def test_scope_and_extra_params_added_to_token_request(self) -> None:
         rec = _Recorder()
 
-        def handler(request: httpx.Request) -> httpx.Response:
+        def handler(request: httpx2.Request) -> httpx2.Response:
             rec.requests.append(request)
             if str(request.url) == TOKEN_URL:
                 return _make_token_response()
-            return httpx.Response(200)
+            return httpx2.Response(200)
 
         auth = OAuth2ClientCredentialsAuth(
             token_url=TOKEN_URL,
@@ -129,11 +129,11 @@ class TestTokenCaching:
     async def test_second_request_reuses_cached_token(self) -> None:
         rec = _Recorder()
 
-        def handler(request: httpx.Request) -> httpx.Response:
+        def handler(request: httpx2.Request) -> httpx2.Response:
             rec.requests.append(request)
             if str(request.url) == TOKEN_URL:
                 return _make_token_response("cached", expires_in=3600)
-            return httpx.Response(200, json={"ok": True})
+            return httpx2.Response(200, json={"ok": True})
 
         auth = OAuth2ClientCredentialsAuth(
             token_url=TOKEN_URL, client_id="cid", client_secret="csec"
@@ -155,12 +155,12 @@ class TestTokenCaching:
         rec = _Recorder()
         token_counter = {"n": 0}
 
-        def handler(request: httpx.Request) -> httpx.Response:
+        def handler(request: httpx2.Request) -> httpx2.Response:
             rec.requests.append(request)
             if str(request.url) == TOKEN_URL:
                 token_counter["n"] += 1
                 return _make_token_response(f"tok-{token_counter['n']}", expires_in=3600)
-            return httpx.Response(200)
+            return httpx2.Response(200)
 
         auth = OAuth2ClientCredentialsAuth(
             token_url=TOKEN_URL, client_id="cid", client_secret="csec"
@@ -182,12 +182,12 @@ class TestTokenCaching:
         rec = _Recorder()
         token_counter = {"n": 0}
 
-        def handler(request: httpx.Request) -> httpx.Response:
+        def handler(request: httpx2.Request) -> httpx2.Response:
             rec.requests.append(request)
             if str(request.url) == TOKEN_URL:
                 token_counter["n"] += 1
                 return _make_token_response(f"tok-{token_counter['n']}")
-            return httpx.Response(200)
+            return httpx2.Response(200)
 
         auth = OAuth2ClientCredentialsAuth(
             token_url=TOKEN_URL, client_id="cid", client_secret="csec"
@@ -207,7 +207,7 @@ class TestRefreshOn401:
         token_counter = {"n": 0}
         api_call_count = {"n": 0}
 
-        def handler(request: httpx.Request) -> httpx.Response:
+        def handler(request: httpx2.Request) -> httpx2.Response:
             rec.requests.append(request)
             if str(request.url) == TOKEN_URL:
                 token_counter["n"] += 1
@@ -215,8 +215,8 @@ class TestRefreshOn401:
             api_call_count["n"] += 1
             # First API call rejects token despite it being fresh; second accepts.
             if api_call_count["n"] == 1:
-                return httpx.Response(401)
-            return httpx.Response(200, json={"ok": True})
+                return httpx2.Response(401)
+            return httpx2.Response(200, json={"ok": True})
 
         auth = OAuth2ClientCredentialsAuth(
             token_url=TOKEN_URL, client_id="cid", client_secret="csec"
@@ -231,10 +231,10 @@ class TestRefreshOn401:
 class TestTokenEndpointErrors:
     @pytest.mark.asyncio
     async def test_non_200_token_response_raises_authentication_error(self) -> None:
-        def handler(request: httpx.Request) -> httpx.Response:
+        def handler(request: httpx2.Request) -> httpx2.Response:
             if str(request.url) == TOKEN_URL:
-                return httpx.Response(403, text="forbidden")
-            return httpx.Response(200)
+                return httpx2.Response(403, text="forbidden")
+            return httpx2.Response(200)
 
         auth = OAuth2ClientCredentialsAuth(
             token_url=TOKEN_URL, client_id="cid", client_secret="csec"
@@ -246,10 +246,10 @@ class TestTokenEndpointErrors:
 
     @pytest.mark.asyncio
     async def test_non_json_token_response_raises_authentication_error(self) -> None:
-        def handler(request: httpx.Request) -> httpx.Response:
+        def handler(request: httpx2.Request) -> httpx2.Response:
             if str(request.url) == TOKEN_URL:
-                return httpx.Response(200, text="<html>nope</html>")
-            return httpx.Response(200)
+                return httpx2.Response(200, text="<html>nope</html>")
+            return httpx2.Response(200)
 
         auth = OAuth2ClientCredentialsAuth(
             token_url=TOKEN_URL, client_id="cid", client_secret="csec"
@@ -260,10 +260,10 @@ class TestTokenEndpointErrors:
 
     @pytest.mark.asyncio
     async def test_missing_access_token_field_raises_authentication_error(self) -> None:
-        def handler(request: httpx.Request) -> httpx.Response:
+        def handler(request: httpx2.Request) -> httpx2.Response:
             if str(request.url) == TOKEN_URL:
-                return httpx.Response(200, json={"expires_in": 3600})
-            return httpx.Response(200)
+                return httpx2.Response(200, json={"expires_in": 3600})
+            return httpx2.Response(200)
 
         auth = OAuth2ClientCredentialsAuth(
             token_url=TOKEN_URL, client_id="cid", client_secret="csec"
@@ -274,10 +274,10 @@ class TestTokenEndpointErrors:
 
     @pytest.mark.asyncio
     async def test_missing_expires_in_falls_back_to_one_hour(self) -> None:
-        def handler(request: httpx.Request) -> httpx.Response:
+        def handler(request: httpx2.Request) -> httpx2.Response:
             if str(request.url) == TOKEN_URL:
-                return httpx.Response(200, json={"access_token": "tok"})
-            return httpx.Response(200)
+                return httpx2.Response(200, json={"access_token": "tok"})
+            return httpx2.Response(200)
 
         auth = OAuth2ClientCredentialsAuth(
             token_url=TOKEN_URL, client_id="cid", client_secret="csec"
