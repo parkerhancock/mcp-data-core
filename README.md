@@ -2,7 +2,7 @@
 
 **Batteries-included async HTTP scaffolding and MCP server plumbing for Python data-fetching libraries.**
 
-If you're writing a Python library that pulls structured data from an API — patents, court filings, FDA records, financial filings, anything — you end up rebuilding the same eight things: an `httpx` client with retry, an HTTP cache, a tenacity policy, an OAuth helper, response envelopes, a typed exception hierarchy, per-app logging, and (if you ship an MCP server) tool registration, auth, and signed downloads. `mcp-data-core` is those eight things, packaged.
+If you're writing a Python library that pulls structured data from an API — patents, court filings, FDA records, financial filings, anything — you end up rebuilding the same eight things: an `httpx2` client with retry, an HTTP cache, a tenacity policy, an OAuth helper, response envelopes, a typed exception hierarchy, per-app logging, and (if you ship an MCP server) tool registration, auth, and signed downloads. `mcp-data-core` is those eight things, packaged.
 
 ## Quick Start
 
@@ -35,10 +35,10 @@ That's the full surface. Retry, caching, error mapping, and connection pooling a
 
 | Feature | What you get |
 |---|---|
-| **`BaseAsyncClient`** | `httpx.AsyncClient` subclass with retry, caching, error mapping, and cache-management methods. Override `DEFAULT_BASE_URL` + `CACHE_NAME`; the rest is inherited. |
+| **`BaseAsyncClient`** | `httpx2.AsyncClient` subclass with retry, caching, error mapping, and cache-management methods. Override `DEFAULT_BASE_URL` + `CACHE_NAME`; the rest is inherited. |
 | **HTTP caching** | `hishel`-backed cache with a custom SQLite/WAL storage layer. Respects HTTP cache headers by default, with TTL override. Inspection (`cache_stats`), eviction (`cache_clear_expired`), and pattern-based invalidation (`cache_invalidate`) built in. |
 | **Retry policy** | `tenacity`-based exponential-jitter retry (4 attempts default). Retryable status set covers 408, 429, 500-504. Honors `Retry-After` headers. |
-| **OAuth2 client credentials** | `OAuth2ClientCredentialsAuth` — drop-in `httpx.Auth` that handles token refresh, retries on 401, and works behind the cache layer. |
+| **OAuth2 client credentials** | `OAuth2ClientCredentialsAuth` — drop-in `httpx2.Auth` that handles token refresh, retries on 401, and works behind the cache layer. |
 | **Response envelopes** | `ResponseEnvelope`, `ListEnvelope`, `Provenance`. Cursor-based pagination helpers (`encode_cursor` / `decode_cursor`). Every response carries source provenance so downstream consumers can cite. |
 | **Typed exceptions** | `McpDataCoreError` base + `ApiError`, `RateLimitError`, `NotFoundError`, `AuthenticationError`, `ServerError`, `ConfigurationError`, `ValidationError`, `ParseError`. Log-first error formatting: `str(err)` appends the log path so agents can inspect without keeping stacktraces in context. |
 | **Per-app file logging** | `logging.configure("my_app")` attaches a file handler under the `my_app` logger tree, writing to `~/.cache/my_app/my_app.log`. Idempotent; each consumer library logs to its own file. |
@@ -124,7 +124,7 @@ Extracted from [patent-client-agents](https://github.com/parkerhancock/patent-cl
 
 - Python 3.11, 3.12, 3.13
 - macOS, Linux. Windows untested.
-- `httpx` 0.27+, `pydantic` 2.7+, `tenacity` 8.4+
+- `httpx2` 2.13.1+, `pydantic` 2.7+, `tenacity` 8.4+
 
 ## Development
 

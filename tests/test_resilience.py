@@ -2,14 +2,14 @@
 
 Regression coverage for the bug where typed ``ServerError`` (5xx) was never
 retried: ``is_retryable_error`` only consulted ``RETRYABLE_STATUS_CODES`` for
-``httpx.HTTPStatusError``, which ``BaseAsyncClient`` never raises — it raises
+``httpx2.HTTPStatusError``, which ``BaseAsyncClient`` never raises — it raises
 the typed errors instead. So USPTO ``data-documents`` 504s blew straight
 through with zero retries.
 """
 
 from __future__ import annotations
 
-import httpx
+import httpx2
 import pytest
 
 from mcp_data_core.base_client import BaseAsyncClient, _redact_url_query
@@ -40,8 +40,8 @@ class _Client(BaseAsyncClient):
 
 
 def _client(handler, *, max_retries: int = 4) -> _Client:
-    transport = httpx.MockTransport(handler)
-    http = httpx.AsyncClient(transport=transport)
+    transport = httpx2.MockTransport(handler)
+    http = httpx2.AsyncClient(transport=transport)
     return _Client(client=http, use_cache=False, max_retries=max_retries)
 
 
@@ -65,7 +65,7 @@ class TestIsRetryableError:
         assert is_retryable_error(RetryableAuthenticationError("try again", 400)) is True
 
     def test_transport_error_is_retryable(self) -> None:
-        assert is_retryable_error(httpx.ConnectError("refused")) is True
+        assert is_retryable_error(httpx2.ConnectError("refused")) is True
 
     def test_unknown_exception_is_not_retryable(self) -> None:
         assert is_retryable_error(ValueError("nope")) is False
@@ -76,11 +76,11 @@ class TestRequestRetries:
     async def test_transient_504_is_retried_then_succeeds(self) -> None:
         calls = {"n": 0}
 
-        def handler(_request: httpx.Request) -> httpx.Response:
+        def handler(_request: httpx2.Request) -> httpx2.Response:
             calls["n"] += 1
             if calls["n"] < 3:
-                return httpx.Response(504, text="<h1>504 Gateway Time-out</h1>")
-            return httpx.Response(200, json={"ok": True})
+                return httpx2.Response(504, text="<h1>504 Gateway Time-out</h1>")
+            return httpx2.Response(200, json={"ok": True})
 
         async with _client(handler, max_retries=4) as c:
             response = await c._request("GET", "/doc", context="download document X")
@@ -92,9 +92,9 @@ class TestRequestRetries:
     async def test_persistent_504_raises_clear_upstream_error(self) -> None:
         calls = {"n": 0}
 
-        def handler(_request: httpx.Request) -> httpx.Response:
+        def handler(_request: httpx2.Request) -> httpx2.Response:
             calls["n"] += 1
-            return httpx.Response(504, text="<h1>504 Gateway Time-out</h1>")
+            return httpx2.Response(504, text="<h1>504 Gateway Time-out</h1>")
 
         async with _client(handler, max_retries=4) as c:
             with pytest.raises(ServerError) as excinfo:
@@ -115,9 +115,9 @@ class TestRequestRetries:
     async def test_404_is_not_retried(self) -> None:
         calls = {"n": 0}
 
-        def handler(_request: httpx.Request) -> httpx.Response:
+        def handler(_request: httpx2.Request) -> httpx2.Response:
             calls["n"] += 1
-            return httpx.Response(404, text="not found")
+            return httpx2.Response(404, text="not found")
 
         async with _client(handler, max_retries=4) as c:
             with pytest.raises(NotFoundError):
@@ -129,8 +129,8 @@ class TestRequestRetries:
 class TestHttpErrorLogging:
     @pytest.mark.asyncio
     async def test_sensitive_query_values_are_redacted(self, caplog) -> None:
-        def handler(_request: httpx.Request) -> httpx.Response:
-            return httpx.Response(400, text="bad request")
+        def handler(_request: httpx2.Request) -> httpx2.Response:
+            return httpx2.Response(400, text="bad request")
 
         path = (
             "/doc?api_key=alpha&ServiceKey=bravo&TK=charlie&Key=delta&ToKeN=echo"

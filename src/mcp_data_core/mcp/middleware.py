@@ -2,7 +2,7 @@
 
 Install order matters. ``FriendlyErrors`` must sit outer of
 ``ToolCallLogger`` so the JSONL log records the original exception type
-(e.g. ``httpx.ReadError``) rather than the remapped ``ToolError``.
+(e.g. ``httpx2.ReadError``) rather than the remapped ``ToolError``.
 """
 
 from __future__ import annotations
@@ -18,7 +18,7 @@ import warnings
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
-import httpx
+import httpx2
 from fastmcp.exceptions import ToolError
 from fastmcp.server.dependencies import get_access_token
 from fastmcp.server.middleware import Middleware, MiddlewareContext
@@ -52,9 +52,9 @@ NOT_RETRYABLE_INTERNAL_MESSAGE = (
 
 def _friendly_message(exc: BaseException) -> str | None:
     """Map an exception to a clean client-facing message, or None to pass through."""
-    if isinstance(exc, (httpx.ReadError, httpx.ConnectError, httpx.RemoteProtocolError)):
+    if isinstance(exc, (httpx2.ReadError, httpx2.ConnectError, httpx2.RemoteProtocolError)):
         return RETRYABLE_MESSAGE
-    if isinstance(exc, httpx.TimeoutException):
+    if isinstance(exc, httpx2.TimeoutException):
         return RETRYABLE_MESSAGE
     if isinstance(exc, RateLimitError):
         return RETRYABLE_MESSAGE

@@ -6,7 +6,7 @@ import asyncio
 import time
 import weakref
 
-import httpx
+import httpx2
 
 
 class HostPacer:
@@ -46,7 +46,7 @@ class HostPacer:
 default_pacer = HostPacer()
 
 
-class PacedTransport(httpx.AsyncBaseTransport):
+class PacedTransport(httpx2.AsyncBaseTransport):
     """Wait for the host's pacing slot before each request reaches the network.
 
     Sits below the HTTP cache, so cache hits return without waiting.
@@ -54,7 +54,7 @@ class PacedTransport(httpx.AsyncBaseTransport):
 
     def __init__(
         self,
-        next_transport: httpx.AsyncBaseTransport,
+        next_transport: httpx2.AsyncBaseTransport,
         interval: float,
         pacer: HostPacer = default_pacer,
     ) -> None:
@@ -62,7 +62,7 @@ class PacedTransport(httpx.AsyncBaseTransport):
         self._interval = interval
         self._pacer = pacer
 
-    async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
+    async def handle_async_request(self, request: httpx2.Request) -> httpx2.Response:
         await self._pacer.wait(request.url.host, self._interval)
         return await self._next.handle_async_request(request)
 

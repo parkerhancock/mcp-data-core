@@ -9,7 +9,7 @@ from email.utils import parsedate_to_datetime
 from pathlib import Path
 from typing import Any, Self
 
-import httpx
+import httpx2
 
 from .cache import CacheManager, CacheStats, build_cached_http_client, get_default_cache_dir
 from .exceptions import (
@@ -113,37 +113,37 @@ class BaseAsyncClient:
         *,
         base_url: str | None = None,
         cache_path: Path | None = None,
-        client: httpx.AsyncClient | None = None,
+        client: httpx2.AsyncClient | None = None,
         use_cache: bool = True,
         ttl_seconds: int | None = None,
         max_retries: int = 4,
         headers: dict[str, str] | None = None,
         timeout: float | None = None,
-        auth: httpx.Auth | None = None,
+        auth: httpx2.Auth | None = None,
         http2: bool | None = None,
         min_request_interval: float | None = None,
-        transport: httpx.AsyncBaseTransport | None = None,
+        transport: httpx2.AsyncBaseTransport | None = None,
     ) -> None:
         """Initialize the client.
 
         Args:
             base_url: Override the default base URL.
             cache_path: Custom path for the cache directory.
-            client: Existing httpx.AsyncClient to use (for testing).
+            client: Existing httpx2.AsyncClient to use (for testing).
             use_cache: Whether to enable HTTP caching.
             ttl_seconds: Default TTL for cache entries. None uses HTTP headers.
             max_retries: Maximum retry attempts for transient failures.
             headers: Additional headers to include in requests.
             timeout: Request timeout in seconds (defaults to ``DEFAULT_TIMEOUT``).
-            auth: httpx Auth handler (e.g. for OAuth2 token refresh).
+            auth: httpx2 Auth handler (e.g. for OAuth2 token refresh).
             http2: Enable HTTP/2 for the underlying client. Falls back to
                 the subclass ``HTTP2`` class attribute. Some upstream APIs
                 (e.g. api.publicrecords.copyright.gov) reject HTTP/1.1.
             min_request_interval: Override ``MIN_REQUEST_INTERVAL``. Ignored
                 when ``client`` is passed; the caller owns that client's
                 transport.
-            transport: Network transport to use in place of httpx's default,
-                e.g. ``httpx.MockTransport`` in tests. Unlike ``client``, it
+            transport: Network transport to use in place of httpx2's default,
+                e.g. ``httpx2.MockTransport`` in tests. Unlike ``client``, it
                 keeps this client's headers, auth, timeout, cache and pacing.
         """
         self.base_url = (base_url or self.DEFAULT_BASE_URL).rstrip("/")
@@ -261,7 +261,7 @@ class BaseAsyncClient:
             return path
         return f"{self.base_url}{path}"
 
-    def _raise_for_status(self, response: httpx.Response, context: str = "") -> None:
+    def _raise_for_status(self, response: httpx2.Response, context: str = "") -> None:
         """Convert HTTP errors to typed exceptions.
 
         Args:
@@ -321,7 +321,7 @@ class BaseAsyncClient:
         headers: dict[str, str] | None = None,
         context: str = "",
         timeout: float | None = None,
-    ) -> httpx.Response:
+    ) -> httpx2.Response:
         """Make an HTTP request with retry logic.
 
         Args:

@@ -6,7 +6,7 @@ from collections.abc import Awaitable, Callable
 from functools import wraps
 from typing import ParamSpec, TypeVar
 
-import httpx
+import httpx2
 from tenacity import (
     AsyncRetrying,
     RetryCallState,
@@ -33,17 +33,17 @@ def is_retryable_error(exc: BaseException) -> bool:
     if isinstance(exc, RetryableAuthenticationError):
         return True
     # Typed API errors carry the upstream status code. BaseAsyncClient raises
-    # these (via ``_raise_for_status``) instead of httpx's HTTPStatusError, so
+    # these (via ``_raise_for_status``) instead of httpx2's HTTPStatusError, so
     # this — not the HTTPStatusError branch below — is what actually gates
     # retries on transient 5xx (e.g. USPTO's data-documents 504s) in practice.
     if isinstance(exc, ApiError):
         return exc.status_code in RETRYABLE_STATUS_CODES
     # Defensive: a caller using response.raise_for_status() directly would
-    # surface httpx.HTTPStatusError instead of our typed error.
-    if isinstance(exc, httpx.HTTPStatusError):
+    # surface httpx2.HTTPStatusError instead of our typed error.
+    if isinstance(exc, httpx2.HTTPStatusError):
         return exc.response.status_code in RETRYABLE_STATUS_CODES
     # Connection/read/write timeouts and other transport-level failures.
-    if isinstance(exc, httpx.TransportError):
+    if isinstance(exc, httpx2.TransportError):
         return True
     return False
 

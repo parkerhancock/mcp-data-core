@@ -211,11 +211,11 @@ async def test_friendly_errors_maps_typed_exception() -> None:
 
 
 async def test_friendly_errors_maps_transport_error_without_exposing_cause() -> None:
-    import httpx
+    import httpx2
 
     from mcp_data_core.mcp.middleware import FriendlyErrors
 
-    exc = httpx.ConnectError("internal-host.example refused the connection")
+    exc = httpx2.ConnectError("internal-host.example refused the connection")
     with pytest.raises(
         ToolError,
         match=(
