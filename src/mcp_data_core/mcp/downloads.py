@@ -29,7 +29,11 @@ Env vars (all accept a ``LAW_TOOLS_*`` legacy alias)::
     LAW_TOOLS_CORE_DOWNLOAD_BASE_URL base URL for download links (defaults to
                                      PUBLIC_URL; set to serve downloads from a
                                      separate host, e.g. a CDN/Worker subdomain)
-    LAW_TOOLS_CORE_API_KEY           secret for HMAC signing
+    LAW_TOOLS_CORE_DOWNLOAD_HMAC_KEY secret for HMAC signing (falls back to
+                                     LAW_TOOLS_CORE_API_KEY when unset)
+    LAW_TOOLS_CORE_DOWNLOAD_HMAC_PREVIOUS_KEY
+                                     verify-only key accepted during a signing-key
+                                     rotation; unset it to end the rotation
     LAW_TOOLS_CORE_DOWNLOAD_CACHE    on-disk cache dir (default: ~/.cache/mcp_data_core/downloads)
     LAW_TOOLS_CORE_DOWNLOAD_TTL_SECONDS  HMAC rotation bucket (default 86400)
 """
@@ -138,7 +142,25 @@ def _explicit_download_base_url() -> str:
 
 
 def _secret() -> str:
-    return _env.get("API_KEY", "")
+    """Key that mints download signatures.
+
+    A dedicated ``DOWNLOAD_HMAC_KEY`` keeps the bearer token from also being
+    able to forge download links. Deployments that predate it sign with
+    ``API_KEY``.
+    """
+    return _env.get("DOWNLOAD_HMAC_KEY") or _env.get("API_KEY", "")
+
+
+def _verify_secrets() -> tuple[str, ...]:
+    """Keys whose signatures ``verify_path`` accepts: current, then previous.
+
+    Empty without a current key, so verification still fails closed.
+    """
+    current = _secret()
+    if not current:
+        return ()
+    previous = _env.get("DOWNLOAD_HMAC_PREVIOUS_KEY")
+    return (current, previous) if previous else (current,)
 
 
 def _cache_dir() -> Path:
@@ -293,13 +315,18 @@ def sign_path(path: str, *, bucket: int | str | None = None) -> str:
     secret = _secret()
     if not secret:
         raise RuntimeError(
-            "Public download URLs require LAW_TOOLS_CORE_API_KEY as an HMAC signing secret; "
-            "OAuth does not protect the public /downloads route. Set the secret, or leave "
+            "Public download URLs require LAW_TOOLS_CORE_DOWNLOAD_HMAC_KEY (or "
+            "LAW_TOOLS_CORE_API_KEY) as an HMAC signing secret; OAuth does not protect "
+            "the public /downloads route. Set the secret, or leave "
             "LAW_TOOLS_CORE_PUBLIC_URL and LAW_TOOLS_CORE_DOWNLOAD_BASE_URL unset for "
             "local/stdio mode."
         )
     if bucket is None:
         bucket = _current_bucket()
+    return _sign(secret, path, bucket)
+
+
+def _sign(secret: str, path: str, bucket: int | str) -> str:
     payload = f"{path}|{bucket}".encode()
     sig = hmac.new(secret.encode(), payload, hashlib.sha256).digest()
     return base64.urlsafe_b64encode(sig[:9]).rstrip(b"=").decode()  # 9 bytes → 12 chars
@@ -313,17 +340,17 @@ def verify_path(path: str, signature: str) -> bool:
     or the special ``"permanent"`` bucket. There is no ``exp`` query
     parameter — the time dimension lives inside the HMAC. The agent
     reads ``expires_at`` from the tool response to know when to re-call.
+    Signatures from ``DOWNLOAD_HMAC_PREVIOUS_KEY`` are also accepted, so
+    links minted before a key rotation keep working until it is unset.
     Verification fails closed when no signing secret is configured;
     local/stdio mode does not mint URLs for this route.
     """
-    if not _secret():
-        return False
     current = _current_bucket()
     candidate_buckets: tuple[int | str, ...] = (current, current - 1, _PERMANENT_BUCKET)
-    for bucket in candidate_buckets:
-        expected = sign_path(path, bucket=bucket)
-        if hmac.compare_digest(expected, signature):
-            return True
+    for secret in _verify_secrets():
+        for bucket in candidate_buckets:
+            if hmac.compare_digest(_sign(secret, path, bucket), signature):
+                return True
     return False
 
 
@@ -444,7 +471,7 @@ def build_download_url(
         resource_path: Resource path (e.g. ``"uspto/applications/16123456/documents/XYZ"``)
         label: Human-readable description for the return message
         permanent: Mint a URL that never expires. Use sparingly —
-            leaks are valid until ``LAW_TOOLS_CORE_API_KEY`` rotates.
+            leaks are valid until the signing key rotates.
     """
     resource_path = resource_path.strip("/")
     public = _download_base_url()
@@ -553,7 +580,7 @@ async def download_response(
 
     Pass ``permanent=True`` to mint a non-expiring URL (omits
     ``expires_at``); use sparingly because leaks become permanent until
-    ``LAW_TOOLS_CORE_API_KEY`` rotates.
+    the signing key rotates.
 
     In remote/HTTP mode (``LAW_TOOLS_CORE_PUBLIC_URL`` set) the response
     carries a signed ``download_url``. In local/stdio mode the bytes

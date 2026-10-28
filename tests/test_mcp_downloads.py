@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 import asyncio
+import base64
+import hashlib
+import hmac
 import io
 import os
 import time
@@ -30,6 +33,14 @@ def _reset_sources():
     yield
     downloads._SOURCES.clear()
     downloads._SOURCES.update(saved)
+
+
+@pytest.fixture(autouse=True)
+def _no_download_hmac_keys(monkeypatch):
+    """Keep a developer's download-key env vars out of the API_KEY-based tests."""
+    for prefix in ("LAW_TOOLS_CORE_", "LAW_TOOLS_"):
+        monkeypatch.delenv(prefix + "DOWNLOAD_HMAC_KEY", raising=False)
+        monkeypatch.delenv(prefix + "DOWNLOAD_HMAC_PREVIOUS_KEY", raising=False)
 
 
 @pytest.fixture
@@ -62,6 +73,43 @@ class TestHmac:
         monkeypatch.setenv("LAW_TOOLS_API_KEY", "legacy-secret")
         path = "patents/X"
         assert downloads.verify_path(path, downloads.sign_path(path))
+
+    def test_download_key_replaces_bearer_key(self, monkeypatch) -> None:
+        """A dedicated key signs, and the bearer key alone can't forge links."""
+        path = "patents/X"
+        monkeypatch.setenv("LAW_TOOLS_CORE_API_KEY", "bearer")
+        bearer_sig = downloads.sign_path(path)
+        monkeypatch.setenv("LAW_TOOLS_CORE_DOWNLOAD_HMAC_KEY", "download")
+        sig = downloads.sign_path(path)
+        assert sig != bearer_sig
+        assert downloads.verify_path(path, sig)
+        assert not downloads.verify_path(path, bearer_sig)
+
+    def test_previous_key_verifies_but_does_not_sign(self, monkeypatch) -> None:
+        path = "patents/X"
+        monkeypatch.setenv("LAW_TOOLS_CORE_API_KEY", "old")
+        old_sig = downloads.sign_path(path, bucket="permanent")
+        monkeypatch.setenv("LAW_TOOLS_CORE_DOWNLOAD_HMAC_KEY", "new")
+        monkeypatch.setenv("LAW_TOOLS_CORE_DOWNLOAD_HMAC_PREVIOUS_KEY", "old")
+        assert downloads.verify_path(path, old_sig)
+        assert downloads.sign_path(path, bucket="permanent") != old_sig
+        monkeypatch.delenv("LAW_TOOLS_CORE_DOWNLOAD_HMAC_PREVIOUS_KEY")
+        assert not downloads.verify_path(path, old_sig)
+
+    def test_previous_key_alone_does_not_enable_verification(self, monkeypatch) -> None:
+        monkeypatch.setenv("LAW_TOOLS_CORE_API_KEY", "old")
+        old_sig = downloads.sign_path("patents/X")
+        monkeypatch.delenv("LAW_TOOLS_CORE_API_KEY")
+        monkeypatch.delenv("LAW_TOOLS_API_KEY", raising=False)
+        monkeypatch.setenv("LAW_TOOLS_CORE_DOWNLOAD_HMAC_PREVIOUS_KEY", "old")
+        assert not downloads.verify_path("patents/X", old_sig)
+
+    def test_signature_format_unchanged(self, monkeypatch) -> None:
+        """The download Worker verifies the same bytes, so the format must not drift."""
+        monkeypatch.setenv("LAW_TOOLS_CORE_DOWNLOAD_HMAC_KEY", "test-secret")
+        digest = hmac.new(b"test-secret", b"patents/X|permanent", hashlib.sha256).digest()
+        expected = base64.urlsafe_b64encode(digest[:9]).rstrip(b"=").decode()
+        assert downloads.sign_path("patents/X", bucket="permanent") == expected
 
 
 class TestRegistry:
