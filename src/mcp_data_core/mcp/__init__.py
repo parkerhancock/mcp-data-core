@@ -5,7 +5,11 @@ domain-specific download fetchers via
 ``mcp_data_core.mcp.downloads.register_source``.
 
 Env vars (all optional; deployment-specific):
-    LAW_TOOLS_CORE_API_KEY      bearer token + HMAC signing secret
+    LAW_TOOLS_CORE_API_KEY      bearer token (and HMAC signing secret when
+                                LAW_TOOLS_CORE_DOWNLOAD_HMAC_KEY is unset)
+    LAW_TOOLS_CORE_DOWNLOAD_HMAC_KEY   HMAC signing secret for download URLs
+    LAW_TOOLS_CORE_DOWNLOAD_HMAC_PREVIOUS_KEY
+                                       verify-only key during a signing rotation
     LAW_TOOLS_CORE_PUBLIC_URL   base URL for signed download links
     LAW_TOOLS_CORE_LOG_DIR      directory for tool-call JSONL logs
     LAW_TOOLS_CORE_ACTOR_HASH_KEY HMAC key for pseudonymous active-user counts
