@@ -1276,3 +1276,72 @@ class TestStoreRoutedDownloads:
         assert "bundle.zip" in resp.headers["Content-Disposition"]
         with zipfile.ZipFile(io.BytesIO(resp.content)) as zf:
             assert len(zf.namelist()) == 2
+
+
+class TestHandleDownloadLargeFiles:
+    """Large downloads stream with no Content-Length (Cloud Run caps buffered ones at 32 MiB)."""
+
+    def _setup(self, tmp_path, monkeypatch, threshold: int = 10) -> None:
+        monkeypatch.setenv("LAW_TOOLS_CORE_API_KEY", "secret")
+        monkeypatch.setenv("LAW_TOOLS_CORE_DOWNLOAD_CACHE", str(tmp_path / "cache"))
+        monkeypatch.setattr(downloads, "STREAM_THRESHOLD_BYTES", threshold)
+        monkeypatch.setattr(downloads, "_STREAM_CHUNK_BYTES", 4)
+
+    def _get(self, path: str):
+        from starlette.testclient import TestClient
+
+        sig = downloads.sign_path(path)
+        return TestClient(_build_app()).get(f"/downloads/{path}?key={sig}")
+
+    def test_large_store_object_is_streamed(self, tmp_path, monkeypatch) -> None:
+        self._setup(tmp_path, monkeypatch)
+        payload = b"0123456789-large-pamphlet"
+        downloads.set_blob_store(_ReadThroughStore({"epo/patents/WO1A1": payload}))
+        try:
+            resp = self._get("epo/patents/WO1A1")
+        finally:
+            downloads.set_blob_store(None)
+
+        assert resp.status_code == 200
+        assert resp.content == payload
+        assert "content-length" not in resp.headers
+        assert 'filename="WO1A1"' in resp.headers["Content-Disposition"]
+
+    def test_small_store_object_keeps_content_length(self, tmp_path, monkeypatch) -> None:
+        self._setup(tmp_path, monkeypatch, threshold=1024)
+        payload = b"small"
+        downloads.set_blob_store(_ReadThroughStore({"epo/patents/WO2A1": payload}))
+        try:
+            resp = self._get("epo/patents/WO2A1")
+        finally:
+            downloads.set_blob_store(None)
+
+        assert resp.status_code == 200
+        assert resp.content == payload
+        assert resp.headers["content-length"] == str(len(payload))
+
+    def test_large_cached_file_is_streamed(self, tmp_path, monkeypatch) -> None:
+        self._setup(tmp_path, monkeypatch)
+        payload = b"cached-bytes-over-threshold"
+        downloads._cache_put("files/big", payload, filename="big.pdf")
+
+        resp = self._get("files/big")
+
+        assert resp.status_code == 200
+        assert resp.content == payload
+        assert "content-length" not in resp.headers
+
+    def test_large_bulk_zip_omits_content_length(self, tmp_path, monkeypatch) -> None:
+        self._setup(tmp_path, monkeypatch)
+        bulk_dir = tmp_path / "bulk_zips"
+        bulk_dir.mkdir()
+        zip_path = bulk_dir / "big123.zip"
+        payload = b"zip-bytes-payload-over-threshold"
+        zip_path.write_bytes(payload)
+
+        resp = self._get("bulk_zips/big123")
+
+        assert resp.status_code == 200
+        assert resp.content == payload
+        assert "content-length" not in resp.headers
+        assert not zip_path.exists()
