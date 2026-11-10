@@ -142,3 +142,35 @@ class TestRetryAfter:
         wait = wait_retry_after(lambda _state: 1.5, max_retry_after=60.0)
         assert wait(self._state_after(RateLimitError("slow", 429))) == 1.5
         assert wait(self._state_after(ServerError("down", 503))) == 1.5
+
+
+async def test_stalled_loop_does_not_release_waiters_in_a_burst() -> None:
+    pacer = HostPacer()
+    released: list[float] = []
+
+    async def waiter() -> None:
+        await pacer.wait("a.test", 0.05)
+        released.append(time.monotonic())
+
+    tasks = [asyncio.create_task(waiter()) for _ in range(3)]
+    await asyncio.sleep(0.01)
+    # Block the loop past every waiter's nominal slot.
+    time.sleep(0.2)
+    await asyncio.gather(*tasks)
+
+    gaps = [later - earlier for earlier, later in zip(released, released[1:], strict=False)]
+    assert all(gap >= 0.045 for gap in gaps), gaps
+
+
+async def test_cancelled_waiter_does_not_use_a_slot() -> None:
+    pacer = HostPacer()
+    await pacer.wait("a.test", 0.2)
+    waiting = asyncio.create_task(pacer.wait("a.test", 0.2))
+    await asyncio.sleep(0.01)
+    waiting.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await waiting
+    started = time.monotonic()
+    await pacer.wait("a.test", 0.2)
+    # Waits only for the first caller's slot, not an extra one for the cancelled waiter.
+    assert time.monotonic() - started < 0.25

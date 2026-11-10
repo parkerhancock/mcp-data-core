@@ -12,10 +12,13 @@ import httpx2
 class HostPacer:
     """Space requests to the same host at least ``interval`` seconds apart.
 
-    Each caller reserves the next free slot for its host under a short lock,
-    then sleeps outside the lock, so concurrent callers queue in order instead
-    of all waking at once. Slot times are shared across event loops; the locks
-    are per loop because an ``asyncio.Lock`` can't be shared between loops.
+    Callers queue on a per-host lock and hold it while they sleep, and the
+    next slot is measured from when the previous caller actually woke. If the
+    event loop stalls, waiters can't wake together and fire in a burst; they
+    still leave one at a time, ``interval`` apart. A cancelled waiter releases
+    the lock without using a slot. Slot times are shared across event loops;
+    the locks are per loop because an ``asyncio.Lock`` can't be shared
+    between loops.
     """
 
     def __init__(self) -> None:
@@ -36,11 +39,10 @@ class HostPacer:
         if interval <= 0:
             return
         async with self._lock(host):
-            now = time.monotonic()
-            start = max(now, self._next_slot.get(host, 0.0))
-            self._next_slot[host] = start + interval
-        if start > now:
-            await asyncio.sleep(start - now)
+            # Loop because asyncio may fire a timer up to its clock resolution early.
+            while (delay := self._next_slot.get(host, 0.0) - time.monotonic()) > 0:
+                await asyncio.sleep(delay)
+            self._next_slot[host] = time.monotonic() + interval
 
 
 default_pacer = HostPacer()
