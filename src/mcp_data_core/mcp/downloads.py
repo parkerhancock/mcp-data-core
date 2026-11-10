@@ -1288,8 +1288,8 @@ async def _serve_bulk_zip(uuid_hex: str) -> Response:
             if stored is not None:
                 name_bytes = await reader(f"{bulk_key}.name")
                 filename = name_bytes.decode() if name_bytes else f"{uuid_hex}.zip"
-                return Response(
-                    content=stored,
+                return _bytes_response(
+                    stored,
                     media_type="application/zip",
                     headers={
                         "Content-Disposition": f'attachment; filename="{filename}"',
@@ -1307,15 +1307,42 @@ async def _serve_bulk_zip(uuid_hex: str) -> Response:
     size = bulk_path.stat().st_size
     name_sidecar = bulk_path.with_suffix(".name")
     filename = name_sidecar.read_text() if name_sidecar.exists() else f"{uuid_hex}.zip"
+    headers = {
+        "Content-Disposition": f'attachment; filename="{filename}"',
+        "Cache-Control": "no-store",
+    }
+    # A Content-Length makes the response non-chunked, which Cloud Run caps
+    # at 32 MiB; leave it off for large zips (see STREAM_THRESHOLD_BYTES).
+    if size <= STREAM_THRESHOLD_BYTES:
+        headers["Content-Length"] = str(size)
     return StreamingResponse(
         _DeleteOnSuccess(bulk_path, expected_size=size),
         media_type="application/zip",
-        headers={
-            "Content-Disposition": f'attachment; filename="{filename}"',
-            "Content-Length": str(size),
-            "Cache-Control": "no-store",
-        },
+        headers=headers,
     )
+
+
+#: Above this size a download is sent as a chunked stream with no
+#: Content-Length. Cloud Run rejects a non-streamed HTTP/1 response over
+#: 32 MiB ("Response size was too large") and turns it into a 500, so a
+#: 54 MB patent pamphlet never reached the client. Smaller files keep a
+#: plain response with Content-Length.
+STREAM_THRESHOLD_BYTES = 16 * 1024 * 1024
+
+_STREAM_CHUNK_BYTES = 1024 * 1024
+
+
+async def _iter_chunks(content: bytes) -> AsyncIterator[bytes]:
+    view = memoryview(content)
+    for start in range(0, len(view), _STREAM_CHUNK_BYTES):
+        yield bytes(view[start : start + _STREAM_CHUNK_BYTES])
+
+
+def _bytes_response(content: bytes, *, media_type: str, headers: dict[str, str]) -> Response:
+    """Serve in-memory bytes, streaming them when they are too large to buffer."""
+    if len(content) > STREAM_THRESHOLD_BYTES:
+        return StreamingResponse(_iter_chunks(content), media_type=media_type, headers=headers)
+    return Response(content=content, media_type=media_type, headers=headers)
 
 
 async def handle_download(request: Request) -> Response:
@@ -1355,8 +1382,8 @@ async def handle_download(request: Request) -> Response:
         disposition = (
             f'attachment; filename="{cached_filename}"' if cached_filename else "attachment"
         )
-        return Response(
-            content=content,
+        return _bytes_response(
+            content,
             media_type=mime,
             headers={
                 "Content-Disposition": disposition,
@@ -1379,8 +1406,8 @@ async def handle_download(request: Request) -> Response:
                 source_match = _match_source(resource_path)
                 mime = source_match[0].mime_type if source_match else "application/octet-stream"
                 name = resource_path.rsplit("/", 1)[-1] or resource_path
-                return Response(
-                    content=stored,
+                return _bytes_response(
+                    stored,
                     media_type=mime,
                     headers={
                         "Content-Disposition": f'attachment; filename="{name}"',
@@ -1402,8 +1429,8 @@ async def handle_download(request: Request) -> Response:
 
     _cache_put(resource_path, content, filename=filename)
 
-    return Response(
-        content=content,
+    return _bytes_response(
+        content,
         media_type=source.mime_type,
         headers={
             "Content-Disposition": f'attachment; filename="{filename}"',
